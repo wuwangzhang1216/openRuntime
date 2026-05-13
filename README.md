@@ -241,4 +241,4 @@ Planned areas:
 
 ## License
 
-License has not been selected yet.
+MIT License. See [LICENSE](LICENSE).
