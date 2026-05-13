@@ -144,10 +144,10 @@ pub fn build_session_reply_command(
     task: &Task,
     message: &str,
 ) -> Result<Option<RunnerSessionCommand>, String> {
-    let cwd = task.worktree_path.as_deref().unwrap_or(&task.workspace);
     let Some(session_id) = task.runner_session_id.as_deref() else {
         return Ok(None);
     };
+    let cwd = session_reply_cwd(task);
 
     match task.runner {
         RunnerKind::Shell => Ok(None),
@@ -175,6 +175,13 @@ pub fn build_session_reply_command(
                 .to_string(),
         ),
     }
+}
+
+fn session_reply_cwd(task: &Task) -> &str {
+    task.execution_workspace
+        .as_deref()
+        .or(task.worktree_path.as_deref())
+        .unwrap_or(&task.workspace)
 }
 
 pub fn normalize_command(
@@ -369,6 +376,7 @@ mod tests {
             command: "claude -p <goal>".to_string(),
             workspace: ".".to_string(),
             worktree_path: None,
+            execution_workspace: None,
             runner_session_id: Some("abc-123".to_string()),
             base_commit: None,
             diff_stat: None,
@@ -400,6 +408,7 @@ mod tests {
             command: "claude -p <goal>".to_string(),
             workspace: ".".to_string(),
             worktree_path: None,
+            execution_workspace: None,
             runner_session_id: None,
             base_commit: None,
             diff_stat: None,
@@ -422,5 +431,46 @@ mod tests {
 
         task.runner = RunnerKind::Shell;
         assert_eq!(initial_runner_session_id(&task), None);
+    }
+
+    #[test]
+    fn session_reply_cwd_prefers_persisted_execution_workspace() {
+        let mut task = Task {
+            id: uuid::Uuid::nil(),
+            title: "test".to_string(),
+            prompt: "prompt".to_string(),
+            runner: RunnerKind::ClaudeCode,
+            command: "claude -p <goal>".to_string(),
+            workspace: "/repo/frontend".to_string(),
+            worktree_path: Some("/repo/.managed-agents/worktrees/task".to_string()),
+            execution_workspace: Some("/repo/.managed-agents/worktrees/task/frontend".to_string()),
+            runner_session_id: Some("abc-123".to_string()),
+            base_commit: None,
+            diff_stat: None,
+            approved_at: None,
+            worktree_merged_at: None,
+            worktree_cleaned_at: None,
+            status: crate::models::TaskStatus::Queued,
+            budget_minutes: 1,
+            policy: crate::models::TaskPolicy::default(),
+            cost_ledger: CostLedger::default(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            events: Vec::new(),
+        };
+
+        assert_eq!(
+            session_reply_cwd(&task),
+            "/repo/.managed-agents/worktrees/task/frontend"
+        );
+
+        task.execution_workspace = None;
+        assert_eq!(
+            session_reply_cwd(&task),
+            "/repo/.managed-agents/worktrees/task"
+        );
+
+        task.worktree_path = None;
+        assert_eq!(session_reply_cwd(&task), "/repo/frontend");
     }
 }

@@ -92,6 +92,7 @@ type Task = {
   command: string;
   workspace: string;
   worktree_path: string | null;
+  execution_workspace: string | null;
   runner_session_id: string | null;
   base_commit: string | null;
   diff_stat: string | null;
@@ -1438,6 +1439,12 @@ function SessionInspector({ task }: { task?: Task }) {
           label="Runner session"
           value={task.runner_session_id ?? "No runner session id captured yet"}
           mono={Boolean(task.runner_session_id)}
+        />
+        <InspectorItem
+          icon={<Folder className="size-5" />}
+          label="Execution workspace"
+          value={task.execution_workspace ?? "Not prepared yet"}
+          mono={Boolean(task.execution_workspace)}
         />
         <InspectorItem
           icon={<Folder className="size-5" />}

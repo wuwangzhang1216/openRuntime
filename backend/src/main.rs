@@ -315,11 +315,12 @@ async fn get_runner_logs(
         .await
         .map_err(internal_error)?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "task not found".to_string()))?;
-    let events = task_store::load_events(&state.db, id)
+    let events = task_store::load_runner_session_events(&state.db, id)
         .await
         .map_err(internal_error)?;
     let message = if task.runner_session_id.is_some() {
-        "Returning persisted runner event stream for this session".to_string()
+        "Returning persisted runner output and session lifecycle events for this session"
+            .to_string()
     } else {
         "This task does not have a runner session id yet".to_string()
     };
