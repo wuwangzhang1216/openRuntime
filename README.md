@@ -20,6 +20,22 @@ state.
 The goal is not to replace Codex or Claude Code. The goal is to provide the
 runtime layer around them.
 
+## Demo
+
+![openRuntime workflow demo](docs/assets/openruntime-demo.gif)
+
+The demo above was captured from a real local run: a shell task was dispatched
+from the GUI, isolated into a git worktree, allowed to modify a demo repository,
+reviewed through the diff surface, merged back, and cleaned up.
+
+| Dispatch and runner state | Live session timeline |
+| --- | --- |
+| ![Dispatch workspace and runner state](docs/assets/openruntime-dispatch.png) | ![Running task with streamed events](docs/assets/openruntime-running.png) |
+
+| Diff-first review | Merged and cleaned |
+| --- | --- |
+| ![Diff review surface](docs/assets/openruntime-review.png) | ![Merged and cleaned worktree](docs/assets/openruntime-merged-cleaned.png) |
+
 ## What it does
 
 - Runs tasks through `codex`, `claude`, or `/bin/sh`.
