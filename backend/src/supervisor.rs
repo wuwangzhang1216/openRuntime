@@ -46,6 +46,20 @@ impl Supervisor {
         let execution_workspace = worktree_review::prepare_execution_workspace(db, id).await?;
         task = task_store::load_task(db, id).await?.unwrap_or(task);
 
+        if task.runner_session_id.is_none() {
+            if let Some(session_id) = runner_adapters::initial_runner_session_id(&task) {
+                task_store::set_runner_session_id(db, id, &session_id).await?;
+                task_store::insert_event(
+                    db,
+                    id,
+                    EventKind::Lifecycle,
+                    format!("Runner session id: {session_id}"),
+                )
+                .await?;
+                task = task_store::load_task(db, id).await?.unwrap_or(task);
+            }
+        }
+
         let mut runner = runner_adapters::build_runner_command(&task, &execution_workspace)
             .map_err(|message| {
                 format!("Cannot start {} runner: {message}", task.runner.as_str())
@@ -154,8 +168,78 @@ impl Supervisor {
                     .flush()
                     .await
                     .map_err(|error| format!("failed to flush reply: {error}"))?;
+                return Ok(());
             }
         }
+        drop(children);
+
+        let task = task_store::load_task(db, id)
+            .await?
+            .ok_or_else(|| "task not found".to_string())?;
+        let Some(mut command) = runner_adapters::build_session_reply_command(&task, message)?
+        else {
+            return Err("runner session reply is not available for this task".to_string());
+        };
+
+        task_store::insert_event(
+            db,
+            id,
+            EventKind::Lifecycle,
+            format!("Resuming runner session with {}", command.display),
+        )
+        .await?;
+        task_store::update_status(
+            db,
+            id,
+            TaskStatus::Running,
+            EventKind::Lifecycle,
+            "Runner session reply started".to_string(),
+        )
+        .await?;
+
+        command.command.stdout(std::process::Stdio::piped());
+        command.command.stderr(std::process::Stdio::piped());
+        command.command.stdin(std::process::Stdio::null());
+
+        let mut child = command
+            .command
+            .spawn()
+            .map_err(|error| format!("failed to start session reply: {error}"))?;
+
+        if let Some(stdout) = child.stdout.take() {
+            spawn_output_reader(
+                db.clone(),
+                id,
+                task.runner.clone(),
+                task.policy.clone(),
+                stdout,
+                EventKind::Stdout,
+            );
+        }
+
+        if let Some(stderr) = child.stderr.take() {
+            spawn_output_reader(
+                db.clone(),
+                id,
+                task.runner.clone(),
+                task.policy.clone(),
+                stderr,
+                EventKind::Stderr,
+            );
+        }
+
+        self.children
+            .lock()
+            .await
+            .insert(id, RunningProcess { child, stdin: None });
+        spawn_task_monitor(
+            self.children.clone(),
+            db.clone(),
+            id,
+            task.policy
+                .max_runtime_minutes
+                .unwrap_or(task.budget_minutes),
+        );
 
         Ok(())
     }
@@ -194,6 +278,7 @@ fn spawn_output_reader<R>(
             }
 
             if let Some(session_id) = parsed.session_id {
+                let _ = task_store::set_runner_session_id(&db, task_id, &session_id).await;
                 let _ = task_store::insert_event(
                     &db,
                     task_id,

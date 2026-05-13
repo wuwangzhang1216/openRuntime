@@ -92,6 +92,7 @@ type Task = {
   command: string;
   workspace: string;
   worktree_path: string | null;
+  runner_session_id: string | null;
   base_commit: string | null;
   diff_stat: string | null;
   approved_at: string | null;
@@ -131,6 +132,7 @@ type TaskDiff = {
   task_id: string;
   isolated: boolean;
   worktree_path: string | null;
+  runner_session_id: string | null;
   base_commit: string | null;
   stat: string;
   patch: string;
@@ -1430,6 +1432,12 @@ function SessionInspector({ task }: { task?: Task }) {
           label={runnerLabels[task.runner]}
           value={terminalLabel(task)}
           mono
+        />
+        <InspectorItem
+          icon={<Terminal className="size-5" />}
+          label="Runner session"
+          value={task.runner_session_id ?? "No runner session id captured yet"}
+          mono={Boolean(task.runner_session_id)}
         />
         <InspectorItem
           icon={<Folder className="size-5" />}

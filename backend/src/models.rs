@@ -12,6 +12,7 @@ pub struct Task {
     pub command: String,
     pub workspace: String,
     pub worktree_path: Option<String>,
+    pub runner_session_id: Option<String>,
     pub base_commit: Option<String>,
     pub diff_stat: Option<String>,
     pub approved_at: Option<DateTime<Utc>>,
@@ -255,6 +256,25 @@ pub struct ReplyTaskRequest {
     pub message: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct RunnerSessionResponse {
+    pub task_id: Uuid,
+    pub runner: RunnerKind,
+    pub session_id: Option<String>,
+    pub supported: bool,
+    pub command: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunnerSessionLogsResponse {
+    pub task_id: Uuid,
+    pub runner: RunnerKind,
+    pub session_id: Option<String>,
+    pub events: Vec<TaskEvent>,
+    pub message: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RegisterWorkspaceRequest {
     pub path: String,
@@ -284,6 +304,7 @@ pub struct TaskDiffResponse {
     pub task_id: Uuid,
     pub isolated: bool,
     pub worktree_path: Option<String>,
+    pub runner_session_id: Option<String>,
     pub base_commit: Option<String>,
     pub stat: String,
     pub patch: String,
@@ -302,6 +323,7 @@ pub struct TaskRow {
     pub command: String,
     pub workspace: String,
     pub worktree_path: Option<String>,
+    pub runner_session_id: Option<String>,
     pub base_commit: Option<String>,
     pub diff_stat: Option<String>,
     pub approved_at: Option<String>,

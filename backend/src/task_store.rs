@@ -43,6 +43,7 @@ pub async fn init_database(db: &SqlitePool) -> Result<(), String> {
             command TEXT NOT NULL,
             workspace TEXT NOT NULL,
             worktree_path TEXT,
+            runner_session_id TEXT,
             base_commit TEXT,
             diff_stat TEXT,
             approved_at TEXT,
@@ -97,6 +98,7 @@ pub async fn init_database(db: &SqlitePool) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
 
     ensure_column(db, "tasks", "worktree_path", "TEXT").await?;
+    ensure_column(db, "tasks", "runner_session_id", "TEXT").await?;
     ensure_column(db, "tasks", "base_commit", "TEXT").await?;
     ensure_column(db, "tasks", "diff_stat", "TEXT").await?;
     ensure_column(db, "tasks", "approved_at", "TEXT").await?;
@@ -238,6 +240,7 @@ pub async fn load_task(db: &SqlitePool, id: Uuid) -> Result<Option<Task>, String
         command: row.command,
         workspace: row.workspace,
         worktree_path: row.worktree_path,
+        runner_session_id: row.runner_session_id,
         base_commit: row.base_commit,
         diff_stat: row.diff_stat,
         approved_at: parse_optional_time(row.approved_at.as_deref())?,
@@ -261,7 +264,7 @@ pub async fn load_task_row(db: &SqlitePool, id: Uuid) -> Result<Option<TaskRow>,
     let row = sqlx::query(
         r#"
         SELECT id, title, prompt, runner, command, workspace, status,
-               worktree_path, base_commit, diff_stat, approved_at,
+               worktree_path, runner_session_id, base_commit, diff_stat, approved_at,
                worktree_merged_at, worktree_cleaned_at, budget_minutes,
                policy_json, cost_ledger_json, created_at, updated_at
         FROM tasks
@@ -280,6 +283,7 @@ pub async fn load_task_row(db: &SqlitePool, id: Uuid) -> Result<Option<TaskRow>,
         command: row.get("command"),
         workspace: row.get("workspace"),
         worktree_path: row.get("worktree_path"),
+        runner_session_id: row.get("runner_session_id"),
         base_commit: row.get("base_commit"),
         diff_stat: row.get("diff_stat"),
         approved_at: row.get("approved_at"),
@@ -358,6 +362,21 @@ pub async fn set_worktree(
     sqlx::query("UPDATE tasks SET worktree_path = ?, base_commit = ?, updated_at = ? WHERE id = ?")
         .bind(worktree_path)
         .bind(base_commit)
+        .bind(Utc::now().to_rfc3339())
+        .bind(task_id.to_string())
+        .execute(db)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+pub async fn set_runner_session_id(
+    db: &SqlitePool,
+    task_id: Uuid,
+    runner_session_id: &str,
+) -> Result<(), String> {
+    sqlx::query("UPDATE tasks SET runner_session_id = ?, updated_at = ? WHERE id = ?")
+        .bind(runner_session_id)
         .bind(Utc::now().to_rfc3339())
         .bind(task_id.to_string())
         .execute(db)

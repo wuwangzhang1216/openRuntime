@@ -18,6 +18,7 @@ pub async fn get_task_diff(db: &SqlitePool, id: Uuid) -> Result<TaskDiffResponse
             task_id: id,
             isolated: false,
             worktree_path: None,
+            runner_session_id: task.runner_session_id,
             base_commit: None,
             stat: task.diff_stat.unwrap_or_default(),
             patch: String::new(),
@@ -41,6 +42,7 @@ pub async fn get_task_diff(db: &SqlitePool, id: Uuid) -> Result<TaskDiffResponse
         task_id: id,
         isolated: true,
         worktree_path: Some(worktree_path),
+        runner_session_id: task.runner_session_id,
         base_commit: task.base_commit,
         stat: if stat.trim().is_empty() {
             task.diff_stat.unwrap_or_default()

@@ -13,8 +13,9 @@ use axum::{
 };
 use chrono::Utc;
 use models::{
-    ApproveTaskRequest, HealthResponse, RegisterWorkspaceRequest, ReplyTaskRequest, Task,
-    TaskStatus, WorkspaceProject, WorktreeActionResponse,
+    ApproveTaskRequest, HealthResponse, RegisterWorkspaceRequest, ReplyTaskRequest,
+    RunnerSessionLogsResponse, RunnerSessionResponse, Task, TaskStatus, WorkspaceProject,
+    WorktreeActionResponse,
 };
 use sqlx::{Row, SqlitePool};
 use std::{net::SocketAddr, path::PathBuf};
@@ -61,6 +62,8 @@ async fn main() {
         .route("/tasks/{id}", get(get_task))
         .route("/tasks/{id}/diff", get(get_task_diff))
         .route("/tasks/{id}/events", get(list_events))
+        .route("/tasks/{id}/runner/logs", get(get_runner_logs))
+        .route("/tasks/{id}/runner/attach", post(attach_runner_session))
         .route("/tasks/{id}/approve", post(approve_task))
         .route("/tasks/{id}/reply", post(reply_task))
         .route("/tasks/{id}/start", post(start_task))
@@ -302,6 +305,60 @@ async fn get_task_diff(
         .await
         .map(Json)
         .map_err(internal_error)
+}
+
+async fn get_runner_logs(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<RunnerSessionLogsResponse> {
+    let task = task_store::load_task(&state.db, id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "task not found".to_string()))?;
+    let events = task_store::load_events(&state.db, id)
+        .await
+        .map_err(internal_error)?;
+    let message = if task.runner_session_id.is_some() {
+        "Returning persisted runner event stream for this session".to_string()
+    } else {
+        "This task does not have a runner session id yet".to_string()
+    };
+
+    Ok(Json(RunnerSessionLogsResponse {
+        task_id: id,
+        runner: task.runner,
+        session_id: task.runner_session_id,
+        events,
+        message,
+    }))
+}
+
+async fn attach_runner_session(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<RunnerSessionResponse> {
+    let task = task_store::load_task(&state.db, id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "task not found".to_string()))?;
+    let command = runner_adapters::attach_command_display(&task);
+    let supported = command.is_some();
+    let message = if supported {
+        "Use this command to attach to the underlying runner session in a terminal".to_string()
+    } else if task.runner_session_id.is_none() {
+        "This task does not have a runner session id yet".to_string()
+    } else {
+        "This runner does not expose an attach command".to_string()
+    };
+
+    Ok(Json(RunnerSessionResponse {
+        task_id: id,
+        runner: task.runner,
+        session_id: task.runner_session_id,
+        supported,
+        command,
+        message,
+    }))
 }
 
 async fn approve_task(
