@@ -62,6 +62,20 @@ type TaskPolicy = {
   allow_secrets: boolean;
   require_approval: boolean;
   blocked_commands: string[];
+  allowed_workspaces?: string[];
+  allowed_file_globs?: string[];
+  allowed_mcp_tools?: string[];
+  network_mode?: "disabled" | "localhost" | "enabled";
+  budget_cents?: number | null;
+  max_runtime_minutes?: number | null;
+};
+
+type CostLedger = {
+  runtime_millis: number;
+  input_tokens: number;
+  output_tokens: number;
+  tool_calls: number;
+  estimated_cents: number;
 };
 
 type RunnerInfo = {
@@ -86,6 +100,7 @@ type Task = {
   status: TaskStatus;
   budget_minutes: number;
   policy: TaskPolicy;
+  cost_ledger: CostLedger;
   created_at: string;
   updated_at: string;
   events: TaskEvent[];
@@ -1449,6 +1464,11 @@ function SessionInspector({ task }: { task?: Task }) {
           label={`${task.budget_minutes} minute budget`}
           value={budgetState(task)}
         />
+        <InspectorItem
+          icon={<Gauge className="size-5" />}
+          label="Cost ledger"
+          value={costLedgerSummary(task.cost_ledger)}
+        />
       </InspectorSection>
 
       <InspectorSection title="Guardrails">
@@ -1659,6 +1679,11 @@ function eventBreakdown(task: Task) {
   );
 
   return `Lifecycle ${counts.lifecycle}, stdout ${counts.stdout}, stderr ${counts.stderr}, inputs ${counts.input}, diffs ${counts.diff}, errors ${counts.error}`;
+}
+
+function costLedgerSummary(ledger: CostLedger) {
+  const seconds = Math.round(ledger.runtime_millis / 100) / 10;
+  return `${seconds}s runtime, ${ledger.input_tokens} input tokens, ${ledger.output_tokens} output tokens, ${ledger.tool_calls} tool calls, ${ledger.estimated_cents}c estimated`;
 }
 
 function GuardrailsMenu({
