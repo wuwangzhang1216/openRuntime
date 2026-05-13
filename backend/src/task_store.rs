@@ -43,6 +43,8 @@ pub async fn init_database(db: &SqlitePool) -> Result<(), String> {
             command TEXT NOT NULL,
             workspace TEXT NOT NULL,
             worktree_path TEXT,
+            execution_workspace TEXT,
+            runner_session_id TEXT,
             base_commit TEXT,
             diff_stat TEXT,
             approved_at TEXT,
@@ -97,6 +99,8 @@ pub async fn init_database(db: &SqlitePool) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
 
     ensure_column(db, "tasks", "worktree_path", "TEXT").await?;
+    ensure_column(db, "tasks", "execution_workspace", "TEXT").await?;
+    ensure_column(db, "tasks", "runner_session_id", "TEXT").await?;
     ensure_column(db, "tasks", "base_commit", "TEXT").await?;
     ensure_column(db, "tasks", "diff_stat", "TEXT").await?;
     ensure_column(db, "tasks", "approved_at", "TEXT").await?;
@@ -238,6 +242,8 @@ pub async fn load_task(db: &SqlitePool, id: Uuid) -> Result<Option<Task>, String
         command: row.command,
         workspace: row.workspace,
         worktree_path: row.worktree_path,
+        execution_workspace: row.execution_workspace,
+        runner_session_id: row.runner_session_id,
         base_commit: row.base_commit,
         diff_stat: row.diff_stat,
         approved_at: parse_optional_time(row.approved_at.as_deref())?,
@@ -261,7 +267,7 @@ pub async fn load_task_row(db: &SqlitePool, id: Uuid) -> Result<Option<TaskRow>,
     let row = sqlx::query(
         r#"
         SELECT id, title, prompt, runner, command, workspace, status,
-               worktree_path, base_commit, diff_stat, approved_at,
+               worktree_path, execution_workspace, runner_session_id, base_commit, diff_stat, approved_at,
                worktree_merged_at, worktree_cleaned_at, budget_minutes,
                policy_json, cost_ledger_json, created_at, updated_at
         FROM tasks
@@ -280,6 +286,8 @@ pub async fn load_task_row(db: &SqlitePool, id: Uuid) -> Result<Option<TaskRow>,
         command: row.get("command"),
         workspace: row.get("workspace"),
         worktree_path: row.get("worktree_path"),
+        execution_workspace: row.get("execution_workspace"),
+        runner_session_id: row.get("runner_session_id"),
         base_commit: row.get("base_commit"),
         diff_stat: row.get("diff_stat"),
         approved_at: row.get("approved_at"),
@@ -321,6 +329,28 @@ pub async fn load_events(db: &SqlitePool, task_id: Uuid) -> Result<Vec<TaskEvent
         .collect()
 }
 
+pub async fn load_runner_session_events(
+    db: &SqlitePool,
+    task_id: Uuid,
+) -> Result<Vec<TaskEvent>, String> {
+    Ok(load_events(db, task_id)
+        .await?
+        .into_iter()
+        .filter(|event| is_runner_session_event(&event.kind, &event.message))
+        .collect())
+}
+
+pub(crate) fn is_runner_session_event(kind: &EventKind, message: &str) -> bool {
+    match kind {
+        EventKind::Stdout | EventKind::Stderr => true,
+        EventKind::Lifecycle => {
+            let lower = message.to_lowercase();
+            lower.contains("runner") || lower.contains("session") || lower.starts_with("starting ")
+        }
+        EventKind::Diff | EventKind::Input | EventKind::Error => false,
+    }
+}
+
 pub async fn approve_task(
     db: &SqlitePool,
     task_id: Uuid,
@@ -358,6 +388,36 @@ pub async fn set_worktree(
     sqlx::query("UPDATE tasks SET worktree_path = ?, base_commit = ?, updated_at = ? WHERE id = ?")
         .bind(worktree_path)
         .bind(base_commit)
+        .bind(Utc::now().to_rfc3339())
+        .bind(task_id.to_string())
+        .execute(db)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+pub async fn set_runner_session_id(
+    db: &SqlitePool,
+    task_id: Uuid,
+    runner_session_id: &str,
+) -> Result<(), String> {
+    sqlx::query("UPDATE tasks SET runner_session_id = ?, updated_at = ? WHERE id = ?")
+        .bind(runner_session_id)
+        .bind(Utc::now().to_rfc3339())
+        .bind(task_id.to_string())
+        .execute(db)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+pub async fn set_execution_workspace(
+    db: &SqlitePool,
+    task_id: Uuid,
+    execution_workspace: &str,
+) -> Result<(), String> {
+    sqlx::query("UPDATE tasks SET execution_workspace = ?, updated_at = ? WHERE id = ?")
+        .bind(execution_workspace)
         .bind(Utc::now().to_rfc3339())
         .bind(task_id.to_string())
         .execute(db)
@@ -548,4 +608,36 @@ fn parse_optional_time(value: Option<&str>) -> Result<Option<DateTime<Utc>>, Str
         .filter(|value| !value.trim().is_empty())
         .map(parse_time)
         .transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runner_session_event_filter_keeps_output_and_session_lifecycle_only() {
+        assert!(is_runner_session_event(&EventKind::Stdout, "anything"));
+        assert!(is_runner_session_event(&EventKind::Stderr, "anything"));
+        assert!(is_runner_session_event(
+            &EventKind::Lifecycle,
+            "Runner session id: abc"
+        ));
+        assert!(is_runner_session_event(
+            &EventKind::Lifecycle,
+            "Starting Claude Code runner in /tmp/work"
+        ));
+
+        assert!(!is_runner_session_event(
+            &EventKind::Lifecycle,
+            "Task approved"
+        ));
+        assert!(!is_runner_session_event(
+            &EventKind::Input,
+            "User reply: ok"
+        ));
+        assert!(!is_runner_session_event(
+            &EventKind::Error,
+            "policy blocked"
+        ));
+    }
 }

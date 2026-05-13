@@ -17,6 +17,11 @@ pub struct RunnerCommand {
     pub keep_stdin: bool,
 }
 
+pub struct RunnerSessionCommand {
+    pub command: Command,
+    pub display: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedRunnerLine {
     pub kind: EventKind,
@@ -89,9 +94,17 @@ pub fn build_runner_command(
                 "Claude Code CLI was not found in PATH. Install Claude Code or add `claude` to PATH."
                     .to_string()
             })?;
+            let session_id = task
+                .runner_session_id
+                .clone()
+                .unwrap_or_else(|| task.id.to_string());
             let mut command = Command::new(claude);
             command
                 .arg("-p")
+                .arg("--output-format")
+                .arg("stream-json")
+                .arg("--session-id")
+                .arg(session_id)
                 .arg(&task.prompt)
                 .current_dir(execution_workspace);
             RunnerCommand {
@@ -107,6 +120,68 @@ pub fn build_runner_command(
     }
 
     Ok(result)
+}
+
+pub fn initial_runner_session_id(task: &Task) -> Option<String> {
+    match task.runner {
+        RunnerKind::ClaudeCode => Some(task.id.to_string()),
+        RunnerKind::Shell | RunnerKind::Codex => None,
+    }
+}
+
+pub fn attach_command_display(task: &Task) -> Option<String> {
+    let session_id = task.runner_session_id.as_ref()?;
+    match task.runner {
+        RunnerKind::ClaudeCode => Some(format!("claude --resume {session_id}")),
+        RunnerKind::Codex => Some(format!(
+            "codex resume --include-non-interactive {session_id}"
+        )),
+        RunnerKind::Shell => None,
+    }
+}
+
+pub fn build_session_reply_command(
+    task: &Task,
+    message: &str,
+) -> Result<Option<RunnerSessionCommand>, String> {
+    let Some(session_id) = task.runner_session_id.as_deref() else {
+        return Ok(None);
+    };
+    let cwd = session_reply_cwd(task);
+
+    match task.runner {
+        RunnerKind::Shell => Ok(None),
+        RunnerKind::ClaudeCode => {
+            let claude = find_executable("claude").ok_or_else(|| {
+                "Claude Code CLI was not found in PATH. Install Claude Code or add `claude` to PATH."
+                    .to_string()
+            })?;
+            let mut command = Command::new(claude);
+            command
+                .arg("-p")
+                .arg("--resume")
+                .arg(session_id)
+                .arg("--output-format")
+                .arg("stream-json")
+                .arg(message)
+                .current_dir(cwd);
+            Ok(Some(RunnerSessionCommand {
+                command,
+                display: format!("claude -p --resume {session_id} <reply>"),
+            }))
+        }
+        RunnerKind::Codex => Err(
+            "Codex CLI exposes `codex resume`, but not a non-interactive session reply command yet"
+                .to_string(),
+        ),
+    }
+}
+
+fn session_reply_cwd(task: &Task) -> &str {
+    task.execution_workspace
+        .as_deref()
+        .or(task.worktree_path.as_deref())
+        .unwrap_or(&task.workspace)
 }
 
 pub fn normalize_command(
@@ -142,22 +217,6 @@ pub fn parse_runner_output(
         RunnerKind::ClaudeCode => parse_claude_line(line, fallback_kind),
         RunnerKind::Shell => parse_plain_line(line, fallback_kind),
     }
-}
-
-#[allow(dead_code)]
-pub fn claude_logs_command(session_id: &str) -> Option<Command> {
-    let claude = find_executable("claude")?;
-    let mut command = Command::new(claude);
-    command.arg("logs").arg(session_id);
-    Some(command)
-}
-
-#[allow(dead_code)]
-pub fn claude_attach_command(session_id: &str) -> Option<Command> {
-    let claude = find_executable("claude")?;
-    let mut command = Command::new(claude);
-    command.arg("attach").arg(session_id);
-    Some(command)
 }
 
 pub fn find_executable(name: &str) -> Option<PathBuf> {
@@ -308,11 +367,110 @@ mod tests {
     }
 
     #[test]
-    fn exposes_claude_session_management_commands() {
-        let command = claude_logs_command("abc-123");
+    fn exposes_claude_attach_display() {
+        let task = Task {
+            id: uuid::Uuid::nil(),
+            title: "test".to_string(),
+            prompt: "prompt".to_string(),
+            runner: RunnerKind::ClaudeCode,
+            command: "claude -p <goal>".to_string(),
+            workspace: ".".to_string(),
+            worktree_path: None,
+            execution_workspace: None,
+            runner_session_id: Some("abc-123".to_string()),
+            base_commit: None,
+            diff_stat: None,
+            approved_at: None,
+            worktree_merged_at: None,
+            worktree_cleaned_at: None,
+            status: crate::models::TaskStatus::Queued,
+            budget_minutes: 1,
+            policy: crate::models::TaskPolicy::default(),
+            cost_ledger: CostLedger::default(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            events: Vec::new(),
+        };
 
-        if let Some(command) = command {
-            assert!(format!("{command:?}").contains("logs"));
-        }
+        assert_eq!(
+            attach_command_display(&task).as_deref(),
+            Some("claude --resume abc-123")
+        );
+    }
+
+    #[test]
+    fn claude_uses_task_id_as_initial_session_id() {
+        let mut task = Task {
+            id: uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000123").unwrap(),
+            title: "test".to_string(),
+            prompt: "prompt".to_string(),
+            runner: RunnerKind::ClaudeCode,
+            command: "claude -p <goal>".to_string(),
+            workspace: ".".to_string(),
+            worktree_path: None,
+            execution_workspace: None,
+            runner_session_id: None,
+            base_commit: None,
+            diff_stat: None,
+            approved_at: None,
+            worktree_merged_at: None,
+            worktree_cleaned_at: None,
+            status: crate::models::TaskStatus::Queued,
+            budget_minutes: 1,
+            policy: crate::models::TaskPolicy::default(),
+            cost_ledger: CostLedger::default(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            events: Vec::new(),
+        };
+
+        assert_eq!(
+            initial_runner_session_id(&task).as_deref(),
+            Some("00000000-0000-0000-0000-000000000123")
+        );
+
+        task.runner = RunnerKind::Shell;
+        assert_eq!(initial_runner_session_id(&task), None);
+    }
+
+    #[test]
+    fn session_reply_cwd_prefers_persisted_execution_workspace() {
+        let mut task = Task {
+            id: uuid::Uuid::nil(),
+            title: "test".to_string(),
+            prompt: "prompt".to_string(),
+            runner: RunnerKind::ClaudeCode,
+            command: "claude -p <goal>".to_string(),
+            workspace: "/repo/frontend".to_string(),
+            worktree_path: Some("/repo/.managed-agents/worktrees/task".to_string()),
+            execution_workspace: Some("/repo/.managed-agents/worktrees/task/frontend".to_string()),
+            runner_session_id: Some("abc-123".to_string()),
+            base_commit: None,
+            diff_stat: None,
+            approved_at: None,
+            worktree_merged_at: None,
+            worktree_cleaned_at: None,
+            status: crate::models::TaskStatus::Queued,
+            budget_minutes: 1,
+            policy: crate::models::TaskPolicy::default(),
+            cost_ledger: CostLedger::default(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            events: Vec::new(),
+        };
+
+        assert_eq!(
+            session_reply_cwd(&task),
+            "/repo/.managed-agents/worktrees/task/frontend"
+        );
+
+        task.execution_workspace = None;
+        assert_eq!(
+            session_reply_cwd(&task),
+            "/repo/.managed-agents/worktrees/task"
+        );
+
+        task.worktree_path = None;
+        assert_eq!(session_reply_cwd(&task), "/repo/frontend");
     }
 }

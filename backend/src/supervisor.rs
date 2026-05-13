@@ -44,7 +44,22 @@ impl Supervisor {
         }
 
         let execution_workspace = worktree_review::prepare_execution_workspace(db, id).await?;
+        task_store::set_execution_workspace(db, id, &execution_workspace).await?;
         task = task_store::load_task(db, id).await?.unwrap_or(task);
+
+        if task.runner_session_id.is_none() {
+            if let Some(session_id) = runner_adapters::initial_runner_session_id(&task) {
+                task_store::set_runner_session_id(db, id, &session_id).await?;
+                task_store::insert_event(
+                    db,
+                    id,
+                    EventKind::Lifecycle,
+                    format!("Runner session id: {session_id}"),
+                )
+                .await?;
+                task = task_store::load_task(db, id).await?.unwrap_or(task);
+            }
+        }
 
         let mut runner = runner_adapters::build_runner_command(&task, &execution_workspace)
             .map_err(|message| {
@@ -136,29 +151,131 @@ impl Supervisor {
     }
 
     pub async fn reply(&self, db: &SqlitePool, id: Uuid, message: &str) -> Result<(), String> {
-        if task_store::load_task_row(db, id).await?.is_none() {
-            return Err("task not found".to_string());
-        }
-
-        task_store::insert_event(db, id, EventKind::Input, format!("User reply: {message}"))
-            .await?;
-
+        let task = task_store::load_task(db, id)
+            .await?
+            .ok_or_else(|| "task not found".to_string())?;
         let mut children = self.children.lock().await;
         if let Some(process) = children.get_mut(&id) {
             if let Some(stdin) = process.stdin.as_mut() {
-                stdin
-                    .write_all(format!("{message}\n").as_bytes())
-                    .await
-                    .map_err(|error| format!("failed to send reply: {error}"))?;
-                stdin
-                    .flush()
-                    .await
-                    .map_err(|error| format!("failed to flush reply: {error}"))?;
+                let reply = format!("{message}\n");
+                if let Err(error) = stdin.write_all(reply.as_bytes()).await {
+                    drop(children);
+                    let error = format!("failed to send reply: {error}");
+                    task_store::insert_event(db, id, EventKind::Error, error.clone()).await?;
+                    return Err(error);
+                }
+                if let Err(error) = stdin.flush().await {
+                    drop(children);
+                    let error = format!("failed to flush reply: {error}");
+                    task_store::insert_event(db, id, EventKind::Error, error.clone()).await?;
+                    return Err(error);
+                }
+                drop(children);
+                task_store::insert_event(
+                    db,
+                    id,
+                    EventKind::Input,
+                    format!("User reply: {message}"),
+                )
+                .await?;
+                return Ok(());
             }
+
+            drop(children);
+            let error = live_runner_reply_unavailable_message();
+            task_store::insert_event(db, id, EventKind::Error, error.to_string()).await?;
+            return Err(error.to_string());
         }
+        drop(children);
+
+        let Some(mut command) = (match runner_adapters::build_session_reply_command(&task, message)
+        {
+            Ok(command) => command,
+            Err(error) => {
+                task_store::insert_event(db, id, EventKind::Error, error.clone()).await?;
+                return Err(error);
+            }
+        }) else {
+            let error = "runner session reply is not available for this task".to_string();
+            task_store::insert_event(db, id, EventKind::Error, error.clone()).await?;
+            return Err(error);
+        };
+
+        command.command.stdout(std::process::Stdio::piped());
+        command.command.stderr(std::process::Stdio::piped());
+        command.command.stdin(std::process::Stdio::null());
+
+        let child = command
+            .command
+            .spawn()
+            .map_err(|error| format!("failed to start session reply: {error}"));
+        let mut child = match child {
+            Ok(child) => child,
+            Err(error) => {
+                task_store::insert_event(db, id, EventKind::Error, error.clone()).await?;
+                return Err(error);
+            }
+        };
+
+        if let Some(stdout) = child.stdout.take() {
+            spawn_output_reader(
+                db.clone(),
+                id,
+                task.runner.clone(),
+                task.policy.clone(),
+                stdout,
+                EventKind::Stdout,
+            );
+        }
+
+        if let Some(stderr) = child.stderr.take() {
+            spawn_output_reader(
+                db.clone(),
+                id,
+                task.runner.clone(),
+                task.policy.clone(),
+                stderr,
+                EventKind::Stderr,
+            );
+        }
+
+        self.children
+            .lock()
+            .await
+            .insert(id, RunningProcess { child, stdin: None });
+        spawn_task_monitor(
+            self.children.clone(),
+            db.clone(),
+            id,
+            task.policy
+                .max_runtime_minutes
+                .unwrap_or(task.budget_minutes),
+        );
+
+        task_store::insert_event(db, id, EventKind::Input, format!("User reply: {message}"))
+            .await?;
+        task_store::insert_event(
+            db,
+            id,
+            EventKind::Lifecycle,
+            format!("Resuming runner session with {}", command.display),
+        )
+        .await?;
+        task_store::update_status(
+            db,
+            id,
+            TaskStatus::Running,
+            EventKind::Lifecycle,
+            "Runner session reply started".to_string(),
+        )
+        .await?;
 
         Ok(())
     }
+}
+
+fn live_runner_reply_unavailable_message() -> &'static str {
+    "Runner is still running and cannot accept inline replies through stdin"
 }
 
 fn spawn_output_reader<R>(
@@ -194,6 +311,7 @@ fn spawn_output_reader<R>(
             }
 
             if let Some(session_id) = parsed.session_id {
+                let _ = task_store::set_runner_session_id(&db, task_id, &session_id).await;
                 let _ = task_store::insert_event(
                     &db,
                     task_id,
@@ -329,4 +447,17 @@ fn spawn_task_monitor(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_runner_without_stdin_has_clear_reply_error() {
+        assert_eq!(
+            live_runner_reply_unavailable_message(),
+            "Runner is still running and cannot accept inline replies through stdin"
+        );
+    }
 }
