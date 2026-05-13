@@ -1,58 +1,228 @@
 # openRuntime
 
-Local-first agent management system.
+openRuntime is a local-first control plane for running and supervising coding agents.
+It gives Codex, Claude Code, and shell tasks a shared operating surface: task state,
+runner availability, approval gates, isolated git worktrees, event history, and
+diff-first review before changes are merged back.
 
-## Stack
+The project is aimed at developers and teams who want the ergonomics of an agent
+manager without handing their workspace, credentials, or execution environment to a
+remote runtime.
 
-- `frontend/`: Next.js, React, Tailwind CSS
-- `backend/`: Rust, Axum, Tokio
+## Why it exists
 
-## Run
+Modern coding agents are powerful, but the workflow around them is still rough:
+multiple terminals, invisible process state, unclear permissions, scattered logs,
+and risky file edits directly against the working tree. openRuntime treats each
+agent run as an auditable session with explicit status, policy, output, and review
+state.
 
-Start the Rust API:
+The goal is not to replace Codex or Claude Code. The goal is to provide the
+runtime layer around them.
+
+## What it does
+
+- Runs tasks through `codex`, `claude`, or `/bin/sh`.
+- Shows runner availability before dispatch.
+- Tracks task lifecycle states: queued, running, needs input, ready for review,
+  completed, failed, and stopped.
+- Stores task metadata and event history in local SQLite.
+- Captures lifecycle, stdout, stderr, input, diff, and error events.
+- Supports runtime budgets so long-running sessions can be stopped.
+- Applies first-pass guardrails for network access, git writes, secret access,
+  approval requirements, and blocked command fragments.
+- Creates isolated git worktrees for repo-backed workspaces.
+- Captures diff stats and patches for review.
+- Supports approval, reply, stop, merge, and cleanup actions from the UI.
+- Discovers, registers, and switches workspaces.
+- Recovers persisted task history after backend restart.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  UI["Next.js control plane"] --> API["Rust API / supervisor"]
+  API --> DB["SQLite event store"]
+  API --> Shell["Shell runner"]
+  API --> Codex["Codex CLI"]
+  API --> Claude["Claude Code CLI"]
+  API --> Git["Git worktree isolation"]
+  Git --> Review["Diff review and merge"]
+```
+
+openRuntime is intentionally local-first:
+
+- The frontend runs in Next.js.
+- The backend is a Rust Axum service.
+- Process supervision runs on your machine.
+- Session state is persisted to SQLite.
+- Agent edits are isolated through git worktrees when the workspace is a git repo.
+
+## Repository layout
+
+```text
+.
+|-- backend/     # Rust Axum API, supervisor, policies, SQLite persistence
+|-- frontend/    # Next.js control plane UI
+|-- data/        # Local runtime database, ignored by git
+`-- README.md
+```
+
+## Requirements
+
+- Node.js 20+
+- Rust stable
+- Git
+- Optional: Codex CLI installed and authenticated
+- Optional: Claude Code CLI installed and authenticated
+
+The app can still run shell tasks without Codex or Claude Code. Missing agent
+runners are shown as unavailable in the UI.
+
+## Quick start
+
+Start the backend:
 
 ```bash
 cd backend
 cargo run
 ```
 
-Start the Next.js app:
+Start the frontend:
 
 ```bash
 cd frontend
+npm install
 npm run dev
 ```
 
-Open `http://localhost:3000`. The frontend expects the backend at
-`http://127.0.0.1:8080` unless `NEXT_PUBLIC_API_URL` is set.
+Open:
 
-## Current v0
+```text
+http://localhost:3000
+```
 
-- Create local managed tasks.
-- Run shell, Codex, and Claude Code style tasks through the Rust supervisor.
-- Detect runner availability with `/runners`.
-- Persist tasks and event history in SQLite.
-- Poll task state from the Next.js control plane.
-- Stop running tasks.
-- Capture lifecycle, stdout, stderr, and error events.
-- Enforce a per-task runtime budget.
-- Enforce a first-pass task policy for network, git write, secrets, approval
-  gates, and blocked command fragments.
+By default the frontend talks to:
 
-SQLite defaults to `data/openruntime.sqlite3`. Override it with
-`OPENRUNTIME_DB=/absolute/path/to/file.sqlite3`. The legacy
-`MANAGED_AGENTS_DB` variable is still accepted for existing installs.
+```text
+http://127.0.0.1:8080
+```
 
-Runner support:
+Override it with:
 
-- `shell`: runs `/bin/sh -lc <command>`.
-- `codex`: runs `codex exec --json --skip-git-repo-check -s workspace-write -C <workspace> <goal>`.
-- `claude-code`: runs `claude -p <goal>` when the Claude Code CLI is installed
-  and available in `PATH`.
+```bash
+NEXT_PUBLIC_API_URL=http://127.0.0.1:8080 npm run dev
+```
 
-## Next targets
+## Configuration
 
-- Add git worktree isolation.
-- Add Codex and Claude Code adapters.
-- Add richer policy scopes for filesystem paths and MCP/tool access.
-- Add diff-first review surfaces.
+SQLite defaults to:
+
+```text
+data/openruntime.sqlite3
+```
+
+Override it with:
+
+```bash
+OPENRUNTIME_DB=/absolute/path/to/openruntime.sqlite3 cargo run
+```
+
+For existing installs, the legacy `MANAGED_AGENTS_DB` environment variable is
+still accepted as a fallback.
+
+## Runner behavior
+
+| Runner | Command shape | Notes |
+| --- | --- | --- |
+| Shell | `/bin/sh -lc <command>` | Keeps stdin open so replies can be sent into interactive shell sessions. |
+| Codex | `codex exec --json --skip-git-repo-check -s workspace-write -C <workspace> <goal>` | Runs against the selected execution workspace. |
+| Claude Code | `claude -p <goal>` | Requires the `claude` CLI to be available in `PATH`. |
+
+## Agent workflow
+
+1. Choose a workspace.
+2. Select a runner: Codex, Claude Code, or Shell.
+3. Set a goal, runtime budget, and permission preset.
+4. Start the task.
+5. Watch lifecycle and output events stream into the session timeline.
+6. Reply, approve, stop, or inspect the session when needed.
+7. Review captured diffs.
+8. Merge useful worktree changes back into the target workspace.
+9. Cleanup the isolated worktree.
+
+## Guardrails
+
+openRuntime currently includes local policy checks for:
+
+- network-sensitive command fragments such as `curl`, `wget`, `ssh`, `scp`, and
+  `nc`;
+- git write operations such as commit, merge, rebase, checkout, reset, push, and
+  stash;
+- secret-sensitive command fragments and environment access;
+- explicit human approval before task start;
+- custom blocked command fragments per task.
+
+These guardrails are a practical first layer, not a full sandbox. Treat local
+agent execution with the same care you would use for any tool that can run
+commands in your workspace.
+
+## API surface
+
+The backend exposes a small local API:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /health` | Health check |
+| `GET /runners` | List runner availability |
+| `GET /workspaces` | List known workspaces |
+| `POST /workspaces/pick` | Pick a workspace through the local OS dialog |
+| `POST /workspaces/register` | Register a workspace path |
+| `GET /tasks` | List tasks with events |
+| `POST /tasks` | Create a task |
+| `GET /tasks/{id}` | Read one task |
+| `POST /tasks/{id}/start` | Start or restart a task |
+| `POST /tasks/{id}/stop` | Stop a running task |
+| `POST /tasks/{id}/approve` | Approve a gated task |
+| `POST /tasks/{id}/reply` | Send input to a task |
+| `GET /tasks/{id}/diff` | Read captured diff stat and patch |
+| `POST /tasks/{id}/worktree/merge` | Merge reviewed worktree changes |
+| `POST /tasks/{id}/worktree/cleanup` | Remove an isolated worktree |
+
+## Development
+
+Backend checks:
+
+```bash
+cd backend
+cargo check
+```
+
+Frontend checks:
+
+```bash
+cd frontend
+npm run lint
+npm run build
+```
+
+## Project status
+
+openRuntime is an early, working prototype. The current focus is the local
+single-user control plane: real agent execution, worktree isolation, task
+persistence, and review workflows.
+
+Planned areas:
+
+- stronger filesystem and tool permissions;
+- MCP allowlists and per-tool scopes;
+- cost and token accounting;
+- richer audit export;
+- multi-user/team governance;
+- remote runner support;
+- versioned agent memory;
+- outcome rubrics and automated quality checks.
+
+## License
+
+License has not been selected yet.
