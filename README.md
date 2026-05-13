@@ -44,10 +44,14 @@ reviewed through the diff surface, merged back, and cleaned up.
   completed, failed, and stopped.
 - Stores task metadata and event history in local SQLite.
 - Captures lifecycle, stdout, stderr, input, diff, and error events.
+- Tracks runner session ids and exposes attach/log surfaces for agent sessions.
 - Supports runtime budgets so long-running sessions can be stopped.
-- Applies first-pass guardrails for network access, git writes, secret access,
-  approval requirements, and blocked command fragments.
+- Applies local execution boundaries for workspace access, file/tool allowlists,
+  network mode, secret redaction, approval requirements, and blocked command
+  fragments.
 - Creates isolated git worktrees for repo-backed workspaces.
+- Persists the exact execution workspace used by each task, including repo
+  subdirectories inside isolated worktrees.
 - Captures diff stats and patches for review.
 - Supports approval, reply, stop, merge, and cleanup actions from the UI.
 - Discovers, registers, and switches workspaces.
@@ -152,8 +156,23 @@ still accepted as a fallback.
 | Runner | Command shape | Notes |
 | --- | --- | --- |
 | Shell | `/bin/sh -lc <command>` | Keeps stdin open so replies can be sent into interactive shell sessions. |
-| Codex | `codex exec --json --skip-git-repo-check -s workspace-write -C <workspace> <goal>` | Runs against the selected execution workspace. |
-| Claude Code | `claude -p <goal>` | Requires the `claude` CLI to be available in `PATH`. |
+| Codex | `codex exec --json --skip-git-repo-check -s workspace-write -C <workspace> <goal>` | Streams JSON events and runs against the selected execution workspace. Codex attach commands are shown when a session id is captured, but non-interactive resume replies are not exposed by the CLI yet. |
+| Claude Code | `claude -p --output-format stream-json --session-id <task-id> <goal>` | Streams JSON events, records a stable session id, and can resume with `claude -p --resume <session-id> <reply>`. Requires the `claude` CLI to be available in `PATH`. |
+
+When a selected workspace is a subdirectory of a git repository, openRuntime
+creates a worktree at the repository root and persists the nested execution
+workspace separately. Follow-up replies and resumed runner sessions use that
+persisted execution workspace instead of falling back to the worktree root.
+
+Reply behavior is runner-specific:
+
+- Shell replies are written to the live process stdin.
+- Claude Code replies start a resumed session process when no live child is
+  attached.
+- Codex currently exposes attach/log commands, but openRuntime does not attempt
+  a non-interactive resume reply because the CLI does not provide one.
+- If a live runner process cannot accept stdin, openRuntime records an error
+  instead of spawning a second process over the same task.
 
 ## Agent workflow
 
@@ -177,11 +196,16 @@ openRuntime currently includes local policy checks for:
   stash;
 - secret-sensitive command fragments and environment access;
 - explicit human approval before task start;
+- workspace allowlists;
+- file glob and MCP/tool allowlists passed into runner environments;
+- network mode hints passed into runner environments;
+- secret redaction for persisted runner output;
+- per-task runtime and cost ledger fields;
 - custom blocked command fragments per task.
 
-These guardrails are a practical first layer, not a full sandbox. Treat local
-agent execution with the same care you would use for any tool that can run
-commands in your workspace.
+These guardrails are a practical local execution boundary, not a full sandbox.
+Treat local agent execution with the same care you would use for any tool that
+can run commands in your workspace.
 
 ## API surface
 
@@ -197,6 +221,9 @@ The backend exposes a small local API:
 | `GET /tasks` | List tasks with events |
 | `POST /tasks` | Create a task |
 | `GET /tasks/{id}` | Read one task |
+| `GET /tasks/{id}/events` | Read task event history |
+| `GET /tasks/{id}/runner/logs` | Read persisted runner output and session lifecycle events |
+| `POST /tasks/{id}/runner/attach` | Get the terminal attach command for a captured runner session |
 | `POST /tasks/{id}/start` | Start or restart a task |
 | `POST /tasks/{id}/stop` | Stop a running task |
 | `POST /tasks/{id}/approve` | Approve a gated task |
@@ -230,9 +257,9 @@ persistence, and review workflows.
 
 Planned areas:
 
-- stronger filesystem and tool permissions;
-- MCP allowlists and per-tool scopes;
-- cost and token accounting;
+- stronger filesystem enforcement beyond local allowlists and runner env hints;
+- richer MCP allowlists and per-tool scopes;
+- real token and model-cost accounting from runner event streams;
 - richer audit export;
 - multi-user/team governance;
 - remote runner support;
