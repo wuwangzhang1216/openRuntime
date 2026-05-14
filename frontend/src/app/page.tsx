@@ -148,9 +148,15 @@ type FormState = {
   allowSecrets: boolean;
   requireApproval: boolean;
   blockedCommands: string;
+  allowedWorkspaces: string;
+  allowedFileGlobs: string;
+  allowedMcpTools: string;
+  networkMode: "disabled" | "localhost" | "enabled";
+  budgetCents: string;
+  maxRuntimeMinutes: string;
 };
 
-type PermissionPreset = "default" | "review" | "full";
+type PermissionPreset = "default" | "review" | "full" | "custom";
 
 type WorkspaceProject = {
   name: string;
@@ -179,6 +185,12 @@ const initialForm: FormState = {
   allowSecrets: false,
   requireApproval: false,
   blockedCommands: "rm -rf, sudo, git push, curl, wget, ssh, scp",
+  allowedWorkspaces: "",
+  allowedFileGlobs: "",
+  allowedMcpTools: "",
+  networkMode: "disabled",
+  budgetCents: "",
+  maxRuntimeMinutes: "",
 };
 
 const DEFAULT_BLOCKED_COMMANDS = initialForm.blockedCommands;
@@ -361,6 +373,12 @@ export default function Home() {
             allow_secrets: form.allowSecrets,
             require_approval: form.requireApproval,
             blocked_commands: splitBlockedCommands(form.blockedCommands),
+            allowed_workspaces: splitListInput(form.allowedWorkspaces),
+            allowed_file_globs: splitListInput(form.allowedFileGlobs),
+            allowed_mcp_tools: splitListInput(form.allowedMcpTools),
+            network_mode: form.allowNetwork ? "enabled" : form.networkMode,
+            budget_cents: optionalPositiveInteger(form.budgetCents),
+            max_runtime_minutes: optionalPositiveInteger(form.maxRuntimeMinutes),
           } satisfies TaskPolicy,
         }),
       });
@@ -787,7 +805,7 @@ function CommandComposer({
                   setShowWorkspaces(false);
                 }}
                 className={`flex h-9 items-center gap-2 rounded-full px-3 text-sm transition ${
-                  permissionPreset === "full"
+                  permissionPreset === "full" || permissionPreset === "custom"
                     ? "bg-orange-50 text-[#e84d12] hover:bg-orange-100"
                     : "text-slate-500 hover:bg-slate-100"
                 }`}
@@ -1558,6 +1576,7 @@ function SessionInspector({ task }: { task?: Task }) {
           icon={<Wifi className="size-5" />}
           label={`Network ${networkMode}`}
           enabled={networkMode !== "disabled"}
+          enabledLabel={networkMode === "localhost" ? "local" : "allow"}
         />
         <GuardrailItem
           icon={<GitBranch className="size-5" />}
@@ -1588,8 +1607,23 @@ function SessionInspector({ task }: { task?: Task }) {
         />
         <InspectorItem
           icon={<Shield className="size-5" />}
+          label={`${policy.allowed_file_globs?.length ?? 0} file allowlist globs`}
+          value={policy.allowed_file_globs?.join(", ") || "Workspace boundary only"}
+        />
+        <InspectorItem
+          icon={<Shield className="size-5" />}
           label={`${policy.allowed_mcp_tools?.length ?? 0} allowed tools`}
           value={policy.allowed_mcp_tools?.join(", ") || "No MCP/tool allowlist"}
+        />
+        <InspectorItem
+          icon={<Gauge className="size-5" />}
+          label="Policy budget"
+          value={policyBudgetSummary(policy, task.budget_minutes)}
+        />
+        <InspectorItem
+          icon={<Terminal className="size-5" />}
+          label="Execution boundary env"
+          value={policyExecutionEnvSummary(policy)}
         />
       </InspectorSection>
 
@@ -1819,7 +1853,7 @@ function GuardrailsMenu({
 }) {
   const selected = getPermissionPreset(form);
   const options: {
-    value: PermissionPreset;
+    value: Exclude<PermissionPreset, "custom">;
     label: string;
     icon: ReactNode;
   }[] = [
@@ -1839,9 +1873,14 @@ function GuardrailsMenu({
       icon: <ShieldCheck className="size-5" />,
     },
   ];
+  const networkOptions: FormState["networkMode"][] = [
+    "disabled",
+    "localhost",
+    "enabled",
+  ];
 
   return (
-    <div className="absolute left-0 top-full z-40 mt-2 w-[300px] rounded-[22px] border border-slate-200 bg-white p-2 shadow-[0_22px_70px_rgba(15,23,42,0.16),0_1px_2px_rgba(15,23,42,0.08)]">
+    <div className="absolute left-0 top-full z-40 mt-2 w-[460px] rounded-[22px] border border-slate-200 bg-white p-2 shadow-[0_22px_70px_rgba(15,23,42,0.16),0_1px_2px_rgba(15,23,42,0.08)]">
       <div className="space-y-1">
         {options.map((option) => (
           <button
@@ -1866,22 +1905,190 @@ function GuardrailsMenu({
         ))}
       </div>
 
-      <div className="mt-2 border-t border-slate-100 px-2 pb-2 pt-3">
-        <label className="block text-xs font-medium uppercase tracking-[0.12em] text-slate-400">
-          Blocked commands
-        </label>
-        <input
-          value={form.blockedCommands}
-          onChange={(event) =>
-            onFormChange((current) => ({
-              ...current,
-              blockedCommands: event.target.value,
-            }))
+      <div className="mt-2 max-h-[62vh] space-y-4 overflow-auto border-t border-slate-100 px-2 pb-2 pt-3">
+        <div>
+          <label className="block text-xs font-medium uppercase tracking-[0.12em] text-slate-400">
+            Network mode
+          </label>
+          <div className="mt-2 grid grid-cols-3 gap-1 rounded-2xl bg-slate-100 p-1">
+            {networkOptions.map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() =>
+                  onFormChange((current) => ({
+                    ...current,
+                    networkMode: mode,
+                    allowNetwork: mode === "enabled",
+                  }))
+                }
+                className={`h-9 rounded-xl text-xs font-medium transition ${
+                  form.networkMode === mode
+                    ? "bg-white text-slate-950 shadow-sm"
+                    : "text-slate-500 hover:text-slate-800"
+                }`}
+              >
+                {mode}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-3 gap-2">
+          <PolicyToggle
+            label="Git write"
+            checked={form.allowGitWrite}
+            onChange={(checked) =>
+              onFormChange((current) => ({ ...current, allowGitWrite: checked }))
+            }
+          />
+          <PolicyToggle
+            label="Secrets"
+            checked={form.allowSecrets}
+            onChange={(checked) =>
+              onFormChange((current) => ({ ...current, allowSecrets: checked }))
+            }
+          />
+          <PolicyToggle
+            label="Approval"
+            checked={form.requireApproval}
+            onChange={(checked) =>
+              onFormChange((current) => ({ ...current, requireApproval: checked }))
+            }
+          />
+        </div>
+
+        <div className="grid grid-cols-2 gap-2">
+          <PolicyNumberInput
+            label="Cost cap cents"
+            value={form.budgetCents}
+            onChange={(value) =>
+              onFormChange((current) => ({ ...current, budgetCents: value }))
+            }
+          />
+          <PolicyNumberInput
+            label="Max runtime min"
+            value={form.maxRuntimeMinutes}
+            onChange={(value) =>
+              onFormChange((current) => ({ ...current, maxRuntimeMinutes: value }))
+            }
+          />
+        </div>
+
+        <PolicyTextArea
+          label="Allowed workspaces"
+          value={form.allowedWorkspaces}
+          placeholder="/absolute/path"
+          onChange={(value) =>
+            onFormChange((current) => ({ ...current, allowedWorkspaces: value }))
           }
-          className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-xs text-slate-700 outline-none transition focus:border-slate-300 focus:bg-white"
+        />
+        <PolicyTextArea
+          label="Allowed file globs"
+          value={form.allowedFileGlobs}
+          placeholder="src/**, docs/**"
+          onChange={(value) =>
+            onFormChange((current) => ({ ...current, allowedFileGlobs: value }))
+          }
+        />
+        <PolicyTextArea
+          label="Allowed MCP/tools"
+          value={form.allowedMcpTools}
+          placeholder="github.search, filesystem.read"
+          onChange={(value) =>
+            onFormChange((current) => ({ ...current, allowedMcpTools: value }))
+          }
+        />
+        <PolicyTextArea
+          label="Blocked commands"
+          value={form.blockedCommands}
+          placeholder="rm -rf, sudo, git push"
+          onChange={(value) =>
+            onFormChange((current) => ({ ...current, blockedCommands: value }))
+          }
         />
       </div>
     </div>
+  );
+}
+
+function PolicyToggle({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label
+      className={`flex h-10 cursor-pointer items-center justify-between gap-2 rounded-xl border px-3 text-xs font-medium transition ${
+        checked
+          ? "border-orange-200 bg-orange-50 text-[#e84d12]"
+          : "border-slate-200 bg-slate-50 text-slate-600 hover:bg-white"
+      }`}
+    >
+      <span>{label}</span>
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(event) => onChange(event.target.checked)}
+        className="size-4 accent-slate-900"
+      />
+    </label>
+  );
+}
+
+function PolicyNumberInput({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="block">
+      <span className="block text-xs font-medium uppercase tracking-[0.12em] text-slate-400">
+        {label}
+      </span>
+      <input
+        type="number"
+        min={1}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="mt-2 h-10 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 text-sm text-slate-700 outline-none transition focus:border-slate-300 focus:bg-white"
+      />
+    </label>
+  );
+}
+
+function PolicyTextArea({
+  label,
+  value,
+  placeholder,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  placeholder: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="block">
+      <span className="block text-xs font-medium uppercase tracking-[0.12em] text-slate-400">
+        {label}
+      </span>
+      <textarea
+        value={value}
+        placeholder={placeholder}
+        onChange={(event) => onChange(event.target.value)}
+        rows={2}
+        className="mt-2 min-h-16 w-full resize-y rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-xs leading-5 text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-slate-300 focus:bg-white"
+      />
+    </label>
   );
 }
 
@@ -2049,7 +2256,10 @@ function EventItem({ event }: { event: TaskEvent }) {
   );
 }
 
-function applyPermissionPreset(form: FormState, preset: PermissionPreset) {
+function applyPermissionPreset(
+  form: FormState,
+  preset: Exclude<PermissionPreset, "custom">,
+): FormState {
   switch (preset) {
     case "full":
       return {
@@ -2058,6 +2268,10 @@ function applyPermissionPreset(form: FormState, preset: PermissionPreset) {
         allowGitWrite: true,
         allowSecrets: true,
         requireApproval: false,
+        allowedWorkspaces: "",
+        allowedFileGlobs: "",
+        allowedMcpTools: "",
+        networkMode: "enabled",
         blockedCommands: "",
       };
     case "review":
@@ -2067,6 +2281,10 @@ function applyPermissionPreset(form: FormState, preset: PermissionPreset) {
         allowGitWrite: false,
         allowSecrets: false,
         requireApproval: true,
+        allowedWorkspaces: "",
+        allowedFileGlobs: "",
+        allowedMcpTools: "",
+        networkMode: "disabled",
         blockedCommands: DEFAULT_BLOCKED_COMMANDS,
       };
     case "default":
@@ -2076,21 +2294,69 @@ function applyPermissionPreset(form: FormState, preset: PermissionPreset) {
         allowGitWrite: false,
         allowSecrets: false,
         requireApproval: false,
+        allowedWorkspaces: "",
+        allowedFileGlobs: "",
+        allowedMcpTools: "",
+        networkMode: "disabled",
         blockedCommands: DEFAULT_BLOCKED_COMMANDS,
       };
   }
 }
 
 function getPermissionPreset(form: FormState): PermissionPreset {
-  if (form.allowNetwork || form.allowGitWrite || form.allowSecrets) {
+  const blockedCommands = normalizeList(form.blockedCommands);
+  const defaultBlockedCommands = normalizeList(DEFAULT_BLOCKED_COMMANDS);
+  const hasCustomBudget =
+    optionalPositiveInteger(form.budgetCents) !== null ||
+    optionalPositiveInteger(form.maxRuntimeMinutes) !== null;
+  const hasCustomPolicy =
+    form.networkMode === "localhost" ||
+    splitListInput(form.allowedWorkspaces).length > 0 ||
+    splitListInput(form.allowedFileGlobs).length > 0 ||
+    splitListInput(form.allowedMcpTools).length > 0 ||
+    hasCustomBudget;
+  const hasDefaultBlockedCommands = listsEqual(
+    blockedCommands,
+    defaultBlockedCommands,
+  );
+
+  if (
+    form.allowNetwork &&
+    form.allowGitWrite &&
+    form.allowSecrets &&
+    !form.requireApproval &&
+    form.networkMode === "enabled" &&
+    !hasCustomPolicy &&
+    blockedCommands.length === 0
+  ) {
     return "full";
   }
 
-  if (form.requireApproval) {
+  if (
+    !form.allowNetwork &&
+    !form.allowGitWrite &&
+    !form.allowSecrets &&
+    form.requireApproval &&
+    form.networkMode === "disabled" &&
+    !hasCustomPolicy &&
+    hasDefaultBlockedCommands
+  ) {
     return "review";
   }
 
-  return "default";
+  if (
+    !form.allowNetwork &&
+    !form.allowGitWrite &&
+    !form.allowSecrets &&
+    !form.requireApproval &&
+    form.networkMode === "disabled" &&
+    !hasCustomPolicy &&
+    hasDefaultBlockedCommands
+  ) {
+    return "default";
+  }
+
+  return "custom";
 }
 
 function permissionButtonLabel(preset: PermissionPreset) {
@@ -2099,6 +2365,8 @@ function permissionButtonLabel(preset: PermissionPreset) {
       return "Full access";
     case "review":
       return "Auto-review";
+    case "custom":
+      return "Custom policy";
     case "default":
       return "Default";
   }
@@ -2115,10 +2383,54 @@ function StatusPill({ status }: { status: TaskStatus }) {
 }
 
 function splitBlockedCommands(value: string) {
+  return splitListInput(value);
+}
+
+function splitListInput(value: string) {
   return value
     .split(/[,\n]/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function normalizeList(value: string) {
+  return splitListInput(value).map((item) => item.toLowerCase()).sort();
+}
+
+function listsEqual(left: string[], right: string[]) {
+  return left.length === right.length && left.every((item, index) => item === right[index]);
+}
+
+function optionalPositiveInteger(value: string) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function policyBudgetSummary(policy: TaskPolicy, taskBudgetMinutes: number) {
+  const runtime = policy.max_runtime_minutes
+    ? `${policy.max_runtime_minutes} min policy cap`
+    : `${taskBudgetMinutes} min task budget`;
+  const cost =
+    policy.budget_cents === null || policy.budget_cents === undefined
+      ? "no cost cap"
+      : `${policy.budget_cents}c cost cap`;
+
+  return `${runtime}, ${cost}`;
+}
+
+function policyExecutionEnvSummary(policy: TaskPolicy) {
+  const network = policy.allow_network
+    ? "enabled"
+    : (policy.network_mode ?? "disabled");
+  const tools = policy.allowed_mcp_tools?.length
+    ? `${policy.allowed_mcp_tools.length} tools`
+    : "no tool allowlist";
+  const files = policy.allowed_file_globs?.length
+    ? `${policy.allowed_file_globs.length} file globs`
+    : "workspace files";
+  const secrets = policy.allow_secrets ? "secrets allowed" : "secrets redacted";
+
+  return `network=${network}, git_write=${policy.allow_git_write}, ${secrets}, ${tools}, ${files}`;
 }
 
 function workspaceName(path: string) {
