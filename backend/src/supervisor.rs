@@ -29,9 +29,7 @@ impl Supervisor {
             .await?
             .ok_or_else(|| "task not found".to_string())?;
 
-        if self.children.lock().await.contains_key(&id)
-            || matches!(task.status, TaskStatus::Running | TaskStatus::NeedsInput)
-        {
+        if self.children.lock().await.contains_key(&id) || task.status == TaskStatus::Running {
             return Err("task is already running".to_string());
         }
 

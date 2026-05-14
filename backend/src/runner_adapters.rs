@@ -283,11 +283,10 @@ fn parse_codex_json_line(line: &str, fallback_kind: EventKind) -> ParsedRunnerLi
 
 fn parse_claude_line(line: &str, fallback_kind: EventKind) -> ParsedRunnerLine {
     if let Ok(value) = serde_json::from_str::<Value>(line) {
-        let message = string_field(&value, &["message", "text", "content", "delta"])
-            .map(str::to_string)
-            .unwrap_or_else(|| compact_json(&value));
+        let message = claude_message_text(&value).unwrap_or_else(|| compact_json(&value));
         let event_type = string_field(&value, &["type", "event", "kind"]).unwrap_or("claude-event");
         let needs_input = structured_needs_input(&value, event_type);
+        let cost_delta = claude_cost_delta(&value);
         return ParsedRunnerLine {
             kind: fallback_kind,
             event_type: event_type.to_string(),
@@ -299,9 +298,10 @@ fn parse_claude_line(line: &str, fallback_kind: EventKind) -> ParsedRunnerLine {
                 "runner": "claude-code",
                 "event_type": event_type,
                 "needs_input": needs_input,
+                "cost_delta": cost_delta.clone(),
             }),
             message,
-            cost_delta: CostLedger::default(),
+            cost_delta,
         };
     }
 
@@ -377,6 +377,69 @@ fn number_field(value: &Value, names: &[&str]) -> u64 {
         .unwrap_or_default()
 }
 
+fn f64_field(value: &Value, names: &[&str]) -> f64 {
+    names
+        .iter()
+        .find_map(|name| value.get(*name)?.as_f64())
+        .unwrap_or_default()
+}
+
+fn claude_message_text(value: &Value) -> Option<String> {
+    if let Some(message) = string_field(value, &["message", "text", "content", "delta", "result"]) {
+        return Some(message.to_string());
+    }
+
+    value
+        .get("message")
+        .and_then(|message| {
+            string_field(message, &["text", "content", "delta"])
+                .map(str::to_string)
+                .or_else(|| collect_claude_content_text(message.get("content")?))
+        })
+        .or_else(|| value.get("content").and_then(collect_claude_content_text))
+}
+
+fn collect_claude_content_text(value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        return Some(text.to_string());
+    }
+
+    let parts = value
+        .as_array()?
+        .iter()
+        .filter_map(|part| string_field(part, &["text", "content", "message"]).map(str::to_string))
+        .collect::<Vec<_>>();
+
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
+fn claude_cost_delta(value: &Value) -> CostLedger {
+    let Some(usage) = value.get("usage") else {
+        return CostLedger::default();
+    };
+
+    let input_tokens = number_field(usage, &["input_tokens", "prompt_tokens"])
+        + number_field(usage, &["cache_creation_input_tokens"])
+        + number_field(usage, &["cache_read_input_tokens"]);
+    let output_tokens = number_field(usage, &["output_tokens", "completion_tokens"]);
+    let estimated_cents = (f64_field(value, &["total_cost_usd"]) * 100.0).ceil() as u64;
+    let tool_calls = usage
+        .get("server_tool_use")
+        .map(|server_tool_use| {
+            number_field(server_tool_use, &["web_fetch_requests"])
+                + number_field(server_tool_use, &["web_search_requests"])
+        })
+        .unwrap_or_default();
+
+    CostLedger {
+        runtime_millis: 0,
+        input_tokens,
+        output_tokens,
+        tool_calls,
+        estimated_cents,
+    }
+}
+
 fn compact_json(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "<json event>".to_string())
 }
@@ -396,6 +459,47 @@ mod tests {
         assert_eq!(parsed.cost_delta.input_tokens, 12);
         assert_eq!(parsed.cost_delta.output_tokens, 4);
         assert_eq!(parsed.cost_delta.tool_calls, 1);
+    }
+
+    #[test]
+    fn claude_result_usage_updates_cost_ledger() {
+        let parsed = parse_runner_output(
+            &RunnerKind::ClaudeCode,
+            EventKind::Stdout,
+            r#"{"type":"result","session_id":"abc-123","total_cost_usd":0.0836,"usage":{"input_tokens":7,"cache_creation_input_tokens":8869,"cache_read_input_tokens":44454,"output_tokens":218,"server_tool_use":{"web_fetch_requests":1,"web_search_requests":2}}}"#,
+        );
+
+        assert_eq!(parsed.session_id.as_deref(), Some("abc-123"));
+        assert_eq!(parsed.cost_delta.input_tokens, 53330);
+        assert_eq!(parsed.cost_delta.output_tokens, 218);
+        assert_eq!(parsed.cost_delta.tool_calls, 3);
+        assert_eq!(parsed.cost_delta.estimated_cents, 9);
+    }
+
+    #[test]
+    fn claude_nested_message_content_is_displayed_compactly() {
+        let parsed = parse_runner_output(
+            &RunnerKind::ClaudeCode,
+            EventKind::Stdout,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Created docs/claude-real-gui.md"},{"type":"tool_result","content":"claude real gui ok"}]}}"#,
+        );
+
+        assert_eq!(
+            parsed.message,
+            "Created docs/claude-real-gui.md claude real gui ok"
+        );
+        assert!(!parsed.message.contains(r#""message""#));
+    }
+
+    #[test]
+    fn claude_result_field_is_displayed_as_message() {
+        let parsed = parse_runner_output(
+            &RunnerKind::ClaudeCode,
+            EventKind::Stdout,
+            r#"{"type":"result","result":"Created docs/claude-real-gui.md","session_id":"abc-123"}"#,
+        );
+
+        assert_eq!(parsed.message, "Created docs/claude-real-gui.md");
     }
 
     #[test]

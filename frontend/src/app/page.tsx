@@ -1072,8 +1072,13 @@ function SessionTimeline({
     );
   }
 
-  const canStart = task.status !== "running" && task.status !== "needs-input";
-  const canStop = task.status === "running" || task.status === "needs-input";
+  const canStart =
+    task.status !== "running" &&
+    (task.status !== "needs-input" ||
+      (Boolean(task.approved_at) && !task.current_attempt));
+  const canStop =
+    task.status === "running" ||
+    (task.status === "needs-input" && Boolean(task.current_attempt));
   const latest = latestReadableEvent(task);
   const confirmation = pendingConfirmation
     ? confirmationDetails(task, pendingConfirmation)
