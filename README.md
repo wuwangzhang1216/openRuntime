@@ -43,7 +43,10 @@ reviewed through the diff surface, merged back, and cleaned up.
 - Tracks task lifecycle states: queued, running, needs input, ready for review,
   completed, failed, and stopped.
 - Stores task metadata and event history in local SQLite.
-- Captures lifecycle, stdout, stderr, input, diff, and error events.
+- Captures lifecycle, stdout, stderr, input, diff, and error events with
+  structured metadata.
+- Records task attempts for each start/resume so restarts have separate status,
+  runtime, exit, and blocking context.
 - Tracks runner session ids and exposes attach/log surfaces for agent sessions.
 - Supports runtime budgets so long-running sessions can be stopped.
 - Applies local execution boundaries for workspace access, file/tool allowlists,
@@ -256,7 +259,7 @@ npm run build
 
 openRuntime is an early, working prototype. The current focus is the local
 single-user control plane: real agent execution, worktree isolation, task
-persistence, and review workflows.
+persistence, structured event history, task attempts, and review workflows.
 
 Planned areas:
 

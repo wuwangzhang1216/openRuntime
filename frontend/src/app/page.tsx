@@ -48,11 +48,22 @@ type TaskStatus =
   | "stopped";
 type EventKind = "lifecycle" | "stdout" | "stderr" | "diff" | "input" | "error";
 
+type EventMetadata = {
+  category?: string;
+  reason?: string;
+  source?: string;
+  attempt_id?: string;
+  attempt_number?: number;
+  [key: string]: unknown;
+};
+
 type TaskEvent = {
   id: string;
   task_id: string;
+  attempt_id: string | null;
   kind: EventKind;
   message: string;
+  metadata: EventMetadata | null;
   created_at: string;
 };
 
@@ -84,6 +95,20 @@ type RunnerInfo = {
   command: string;
 };
 
+type TaskAttempt = {
+  id: string;
+  task_id: string;
+  attempt_number: number;
+  runner: RunnerKind;
+  status: TaskStatus;
+  execution_workspace: string | null;
+  runner_session_id: string | null;
+  started_at: string;
+  finished_at: string | null;
+  exit_status: string | null;
+  summary: string | null;
+};
+
 type Task = {
   id: string;
   title: string;
@@ -107,6 +132,8 @@ type Task = {
   created_at: string;
   updated_at: string;
   events: TaskEvent[];
+  attempts: TaskAttempt[];
+  current_attempt: TaskAttempt | null;
 };
 
 type FormState = {
@@ -1396,6 +1423,8 @@ function SessionInspector({ task }: { task?: Task }) {
   const networkMode = policy.allow_network
     ? "enabled"
     : (policy.network_mode ?? "disabled");
+  const currentAttempt = task.current_attempt;
+  const blockedReason = structuredBlockedReason(task);
   const progress = [
     { label: "Create agent session", done: true },
     {
@@ -1490,6 +1519,28 @@ function SessionInspector({ task }: { task?: Task }) {
           label="Cost ledger"
           value={costLedgerSummary(task.cost_ledger)}
         />
+        <InspectorItem
+          icon={<Activity className="size-5" />}
+          label={
+            currentAttempt
+              ? `Attempt ${currentAttempt.attempt_number} ${currentAttempt.status}`
+              : "No attempt yet"
+          }
+          value={
+            currentAttempt
+              ? currentAttempt.summary ??
+                currentAttempt.execution_workspace ??
+                "Attempt is active"
+              : `${task.attempts.length} attempts recorded`
+          }
+        />
+        {blockedReason ? (
+          <InspectorItem
+            icon={<Ban className="size-5" />}
+            label="Blocked reason"
+            value={blockedReason}
+          />
+        ) : null}
       </InspectorSection>
 
       <InspectorSection title="Guardrails">
@@ -1720,6 +1771,27 @@ function eventBreakdown(task: Task) {
 function costLedgerSummary(ledger: CostLedger) {
   const seconds = Math.round(ledger.runtime_millis / 100) / 10;
   return `${seconds}s runtime, ${ledger.input_tokens} input tokens, ${ledger.output_tokens} output tokens, ${ledger.tool_calls} tool calls, ${ledger.estimated_cents}c estimated`;
+}
+
+function structuredBlockedReason(task: Task) {
+  const event = [...task.events].reverse().find((event) => {
+    const category = event.metadata?.category;
+    return (
+      category === "needs-input" ||
+      category === "attempt-stopped" ||
+      category === "attempt-failed" ||
+      category === "attempt-monitor-error"
+    );
+  });
+
+  if (!event) {
+    return null;
+  }
+
+  const reason = event.metadata?.reason;
+  return typeof reason === "string" && reason.trim().length > 0
+    ? reason
+    : event.message;
 }
 
 function GuardrailsMenu({

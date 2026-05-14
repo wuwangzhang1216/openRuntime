@@ -3,7 +3,7 @@ use crate::{
     policy_engine,
 };
 use axum::http::StatusCode;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{
     env,
     ffi::OsString,
@@ -26,9 +26,12 @@ pub struct RunnerSessionCommand {
 pub struct ParsedRunnerLine {
     pub kind: EventKind,
     pub message: String,
+    pub event_type: String,
     pub needs_input: bool,
+    pub needs_input_reason: Option<String>,
     pub cost_delta: CostLedger,
     pub session_id: Option<String>,
+    pub metadata: Value,
 }
 
 pub fn list_runners() -> Vec<RunnerInfo> {
@@ -218,7 +221,7 @@ pub fn parse_runner_output(
     match runner {
         RunnerKind::Codex => parse_codex_json_line(line, fallback_kind),
         RunnerKind::ClaudeCode => parse_claude_line(line, fallback_kind),
-        RunnerKind::Shell => parse_plain_line(line, fallback_kind),
+        RunnerKind::Shell => parse_plain_line("shell", line, fallback_kind),
     }
 }
 
@@ -238,7 +241,7 @@ pub fn find_executable(name: &str) -> Option<PathBuf> {
 
 fn parse_codex_json_line(line: &str, fallback_kind: EventKind) -> ParsedRunnerLine {
     let Ok(value) = serde_json::from_str::<Value>(line) else {
-        return parse_plain_line(line, fallback_kind);
+        return parse_plain_line("codex", line, fallback_kind);
     };
 
     let event_type = string_field(&value, &["type", "event", "kind"]).unwrap_or("codex-event");
@@ -264,10 +267,19 @@ fn parse_codex_json_line(line: &str, fallback_kind: EventKind) -> ParsedRunnerLi
     ParsedRunnerLine {
         kind: fallback_kind,
         message: format!("{event_type}: {message}"),
+        event_type: event_type.to_string(),
         needs_input,
-        cost_delta,
+        needs_input_reason: needs_input.then(|| message.clone()),
+        cost_delta: cost_delta.clone(),
         session_id: string_field(&value, &["session_id", "sessionId", "conversation_id"])
             .map(str::to_string),
+        metadata: json!({
+            "category": "runner-output",
+            "runner": "codex",
+            "event_type": event_type,
+            "needs_input": needs_input,
+            "cost_delta": cost_delta.clone(),
+        }),
     }
 }
 
@@ -278,23 +290,41 @@ fn parse_claude_line(line: &str, fallback_kind: EventKind) -> ParsedRunnerLine {
             .unwrap_or_else(|| compact_json(&value));
         return ParsedRunnerLine {
             kind: fallback_kind,
+            event_type: string_field(&value, &["type", "event", "kind"])
+                .unwrap_or("claude-event")
+                .to_string(),
             needs_input: looks_like_needs_input(&message),
+            needs_input_reason: looks_like_needs_input(&message).then(|| message.clone()),
             session_id: string_field(&value, &["session_id", "sessionId"]).map(str::to_string),
+            metadata: json!({
+                "category": "runner-output",
+                "runner": "claude-code",
+                "event_type": string_field(&value, &["type", "event", "kind"]).unwrap_or("claude-event"),
+                "needs_input": looks_like_needs_input(&message),
+            }),
             message,
             cost_delta: CostLedger::default(),
         };
     }
 
-    parse_plain_line(line, fallback_kind)
+    parse_plain_line("claude-code", line, fallback_kind)
 }
 
-fn parse_plain_line(line: &str, fallback_kind: EventKind) -> ParsedRunnerLine {
+fn parse_plain_line(runner: &str, line: &str, fallback_kind: EventKind) -> ParsedRunnerLine {
     ParsedRunnerLine {
         kind: fallback_kind,
         message: line.to_string(),
+        event_type: "plain".to_string(),
         needs_input: looks_like_needs_input(line),
+        needs_input_reason: looks_like_needs_input(line).then(|| line.to_string()),
         cost_delta: CostLedger::default(),
         session_id: extract_session_id(line),
+        metadata: json!({
+            "category": "runner-output",
+            "runner": runner,
+            "event_type": "plain",
+            "needs_input": looks_like_needs_input(line),
+        }),
     }
 }
 
@@ -370,6 +400,19 @@ mod tests {
     }
 
     #[test]
+    fn plain_fallback_preserves_runner_metadata() {
+        let parsed = parse_runner_output(&RunnerKind::Codex, EventKind::Stdout, "plain output");
+
+        assert_eq!(
+            parsed
+                .metadata
+                .get("runner")
+                .and_then(|value| value.as_str()),
+            Some("codex")
+        );
+    }
+
+    #[test]
     fn exposes_claude_attach_display() {
         let task = Task {
             id: uuid::Uuid::nil(),
@@ -394,6 +437,8 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             events: Vec::new(),
+            attempts: Vec::new(),
+            current_attempt: None,
         };
 
         assert_eq!(
@@ -427,6 +472,8 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             events: Vec::new(),
+            attempts: Vec::new(),
+            current_attempt: None,
         };
 
         assert_eq!(
@@ -463,6 +510,8 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             events: Vec::new(),
+            attempts: Vec::new(),
+            current_attempt: None,
         };
 
         assert_eq!(
