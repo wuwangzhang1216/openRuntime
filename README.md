@@ -162,7 +162,7 @@ still accepted as a fallback.
 | --- | --- | --- |
 | Shell | `/bin/sh -lc <command>` | Keeps stdin open so replies can be sent into interactive shell sessions. |
 | Codex | `codex exec --json --skip-git-repo-check -s workspace-write -C <workspace> <goal>` | Streams JSON events and runs against the selected execution workspace. Codex attach commands are shown when a session id is captured, but non-interactive resume replies are not exposed by the CLI yet. |
-| Claude Code | `claude -p --output-format stream-json --session-id <task-id> <goal>` | Streams JSON events, records a stable session id, and can resume with `claude -p --resume <session-id> <reply>`. Requires the `claude` CLI to be available in `PATH`. |
+| Claude Code | `claude -p --output-format stream-json --verbose --session-id <task-id> <goal>` | Streams JSON events, records a stable session id, and can resume with `claude -p --resume <session-id> --output-format stream-json --verbose <reply>`. Requires the `claude` CLI to be available in `PATH`. |
 
 When a selected workspace is a subdirectory of a git repository, openRuntime
 creates a worktree at the repository root and persists the nested execution

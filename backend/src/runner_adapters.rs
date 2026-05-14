@@ -106,6 +106,7 @@ pub fn build_runner_command(
                 .arg("-p")
                 .arg("--output-format")
                 .arg("stream-json")
+                .arg("--verbose")
                 .arg("--session-id")
                 .arg(session_id)
                 .arg(&task.prompt)
@@ -166,6 +167,7 @@ pub fn build_session_reply_command(
                 .arg(session_id)
                 .arg("--output-format")
                 .arg("stream-json")
+                .arg("--verbose")
                 .arg(message)
                 .current_dir(cwd);
             for (name, value) in policy_engine::execution_env(task.execution_policy()) {
@@ -248,11 +250,7 @@ fn parse_codex_json_line(line: &str, fallback_kind: EventKind) -> ParsedRunnerLi
     let message = string_field(&value, &["message", "text", "delta", "content"])
         .map(str::to_string)
         .unwrap_or_else(|| compact_json(&value));
-    let needs_input = looks_like_needs_input(&message)
-        || matches!(
-            event_type,
-            "approval_request" | "user_input_request" | "needs_input"
-        );
+    let needs_input = structured_needs_input(&value, event_type);
     let mut cost_delta = CostLedger::default();
 
     if let Some(usage) = value.get("usage") {
@@ -288,19 +286,19 @@ fn parse_claude_line(line: &str, fallback_kind: EventKind) -> ParsedRunnerLine {
         let message = string_field(&value, &["message", "text", "content", "delta"])
             .map(str::to_string)
             .unwrap_or_else(|| compact_json(&value));
+        let event_type = string_field(&value, &["type", "event", "kind"]).unwrap_or("claude-event");
+        let needs_input = structured_needs_input(&value, event_type);
         return ParsedRunnerLine {
             kind: fallback_kind,
-            event_type: string_field(&value, &["type", "event", "kind"])
-                .unwrap_or("claude-event")
-                .to_string(),
-            needs_input: looks_like_needs_input(&message),
-            needs_input_reason: looks_like_needs_input(&message).then(|| message.clone()),
+            event_type: event_type.to_string(),
+            needs_input,
+            needs_input_reason: needs_input.then(|| message.clone()),
             session_id: string_field(&value, &["session_id", "sessionId"]).map(str::to_string),
             metadata: json!({
                 "category": "runner-output",
                 "runner": "claude-code",
-                "event_type": string_field(&value, &["type", "event", "kind"]).unwrap_or("claude-event"),
-                "needs_input": looks_like_needs_input(&message),
+                "event_type": event_type,
+                "needs_input": needs_input,
             }),
             message,
             cost_delta: CostLedger::default(),
@@ -335,13 +333,25 @@ fn looks_like_needs_input(message: &str) -> bool {
         "waiting for input",
         "approval required",
         "requires approval",
+        "permission required",
+        "requires permission",
+        "waiting for permission",
         "do you want to proceed",
         "continue?",
         "proceed?",
-        "permission",
     ]
     .iter()
     .any(|needle| lower.contains(needle))
+}
+
+fn structured_needs_input(value: &Value, event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "approval_request" | "permission_request" | "user_input_request" | "needs_input"
+    ) || value
+        .get("needs_input")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn extract_session_id(line: &str) -> Option<String> {
@@ -397,6 +407,39 @@ mod tests {
         );
 
         assert!(parsed.needs_input);
+    }
+
+    #[test]
+    fn does_not_treat_permission_mentions_as_needs_input() {
+        let parsed = parse_runner_output(
+            &RunnerKind::Codex,
+            EventKind::Stdout,
+            r#"{"type":"item.completed","message":"unclear permissions and scattered logs"}"#,
+        );
+
+        assert!(!parsed.needs_input);
+    }
+
+    #[test]
+    fn codex_structured_output_does_not_scan_embedded_content_for_needs_input() {
+        let parsed = parse_runner_output(
+            &RunnerKind::Codex,
+            EventKind::Stdout,
+            r#"{"type":"item.completed","message":"README says tasks can be needs input or completed"}"#,
+        );
+
+        assert!(!parsed.needs_input);
+    }
+
+    #[test]
+    fn claude_structured_output_does_not_scan_embedded_content_for_needs_input() {
+        let parsed = parse_runner_output(
+            &RunnerKind::ClaudeCode,
+            EventKind::Stdout,
+            r#"{"type":"assistant","message":"README says tasks can be needs input or completed"}"#,
+        );
+
+        assert!(!parsed.needs_input);
     }
 
     #[test]
