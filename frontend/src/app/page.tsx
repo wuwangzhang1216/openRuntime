@@ -2306,11 +2306,15 @@ function applyPermissionPreset(
 function getPermissionPreset(form: FormState): PermissionPreset {
   const blockedCommands = normalizeList(form.blockedCommands);
   const defaultBlockedCommands = normalizeList(DEFAULT_BLOCKED_COMMANDS);
-  const hasCustomBoundary =
+  const hasCustomBudget =
+    optionalPositiveInteger(form.budgetCents) !== null ||
+    optionalPositiveInteger(form.maxRuntimeMinutes) !== null;
+  const hasCustomPolicy =
     form.networkMode === "localhost" ||
     splitListInput(form.allowedWorkspaces).length > 0 ||
     splitListInput(form.allowedFileGlobs).length > 0 ||
-    splitListInput(form.allowedMcpTools).length > 0;
+    splitListInput(form.allowedMcpTools).length > 0 ||
+    hasCustomBudget;
   const hasDefaultBlockedCommands = listsEqual(
     blockedCommands,
     defaultBlockedCommands,
@@ -2322,7 +2326,7 @@ function getPermissionPreset(form: FormState): PermissionPreset {
     form.allowSecrets &&
     !form.requireApproval &&
     form.networkMode === "enabled" &&
-    !hasCustomBoundary &&
+    !hasCustomPolicy &&
     blockedCommands.length === 0
   ) {
     return "full";
@@ -2334,7 +2338,7 @@ function getPermissionPreset(form: FormState): PermissionPreset {
     !form.allowSecrets &&
     form.requireApproval &&
     form.networkMode === "disabled" &&
-    !hasCustomBoundary &&
+    !hasCustomPolicy &&
     hasDefaultBlockedCommands
   ) {
     return "review";
@@ -2346,7 +2350,7 @@ function getPermissionPreset(form: FormState): PermissionPreset {
     !form.allowSecrets &&
     !form.requireApproval &&
     form.networkMode === "disabled" &&
-    !hasCustomBoundary &&
+    !hasCustomPolicy &&
     hasDefaultBlockedCommands
   ) {
     return "default";
