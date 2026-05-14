@@ -24,17 +24,23 @@ runtime layer around them.
 
 ![openRuntime workflow demo](docs/assets/openruntime-demo.gif)
 
-The demo above was captured from a real local run: a shell task was dispatched
-from the GUI, isolated into a git worktree, allowed to modify a demo repository,
-reviewed through the diff surface, merged back, and cleaned up.
+The demo above was captured from real local runs against a temporary git
+workspace. It includes a shell policy-boundary task, a Codex task, and a Claude
+Code task dispatched through the GUI, isolated into git worktrees, streamed into
+the session timeline, reviewed through the diff surface, plus a reviewed
+worktree merged and cleaned up from the UI.
 
-| Dispatch and runner state | Live session timeline |
+| Dispatch policy and runner state | Live session timeline |
 | --- | --- |
 | ![Dispatch workspace and runner state](docs/assets/openruntime-dispatch.png) | ![Running task with streamed events](docs/assets/openruntime-running.png) |
 
-| Diff-first review | Merged and cleaned |
+| Real Codex and Claude Code sessions | Diff-first review |
 | --- | --- |
-| ![Diff review surface](docs/assets/openruntime-review.png) | ![Merged and cleaned worktree](docs/assets/openruntime-merged-cleaned.png) |
+| ![Real Codex and Claude Code sessions](docs/assets/openruntime-real-agents.png) | ![Diff review surface](docs/assets/openruntime-review.png) |
+
+| Merged and cleaned worktree |
+| --- |
+| ![Merged and cleaned worktree](docs/assets/openruntime-merged-cleaned.png) |
 
 ## What it does
 
