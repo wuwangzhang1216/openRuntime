@@ -115,7 +115,7 @@ pub fn build_runner_command(
         }
     };
 
-    for (name, value) in policy_engine::execution_env(&task.policy) {
+    for (name, value) in policy_engine::execution_env(task.execution_policy()) {
         result.command.env(name, value);
     }
 
@@ -165,6 +165,9 @@ pub fn build_session_reply_command(
                 .arg("stream-json")
                 .arg(message)
                 .current_dir(cwd);
+            for (name, value) in policy_engine::execution_env(task.execution_policy()) {
+                command.env(name, value);
+            }
             Ok(Some(RunnerSessionCommand {
                 command,
                 display: format!("claude -p --resume {session_id} <reply>"),
@@ -386,6 +389,7 @@ mod tests {
             status: crate::models::TaskStatus::Queued,
             budget_minutes: 1,
             policy: crate::models::TaskPolicy::default(),
+            effective_policy: None,
             cost_ledger: CostLedger::default(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -418,6 +422,7 @@ mod tests {
             status: crate::models::TaskStatus::Queued,
             budget_minutes: 1,
             policy: crate::models::TaskPolicy::default(),
+            effective_policy: None,
             cost_ledger: CostLedger::default(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -453,6 +458,7 @@ mod tests {
             status: crate::models::TaskStatus::Queued,
             budget_minutes: 1,
             policy: crate::models::TaskPolicy::default(),
+            effective_policy: None,
             cost_ledger: CostLedger::default(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
