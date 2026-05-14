@@ -53,6 +53,7 @@ pub async fn init_database(db: &SqlitePool) -> Result<(), String> {
             status TEXT NOT NULL,
             budget_minutes INTEGER NOT NULL,
             policy_json TEXT NOT NULL,
+            effective_policy_json TEXT,
             cost_ledger_json TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -106,6 +107,7 @@ pub async fn init_database(db: &SqlitePool) -> Result<(), String> {
     ensure_column(db, "tasks", "approved_at", "TEXT").await?;
     ensure_column(db, "tasks", "worktree_merged_at", "TEXT").await?;
     ensure_column(db, "tasks", "worktree_cleaned_at", "TEXT").await?;
+    ensure_column(db, "tasks", "effective_policy_json", "TEXT").await?;
     ensure_column(db, "tasks", "cost_ledger_json", "TEXT").await?;
 
     Ok(())
@@ -252,6 +254,10 @@ pub async fn load_task(db: &SqlitePool, id: Uuid) -> Result<Option<Task>, String
         status: TaskStatus::from_str(&row.status)?,
         budget_minutes: row.budget_minutes.try_into().unwrap_or(15),
         policy: serde_json::from_str(&row.policy_json).unwrap_or_default(),
+        effective_policy: row
+            .effective_policy_json
+            .as_deref()
+            .and_then(|value| serde_json::from_str(value).ok()),
         cost_ledger: row
             .cost_ledger_json
             .as_deref()
@@ -269,7 +275,7 @@ pub async fn load_task_row(db: &SqlitePool, id: Uuid) -> Result<Option<TaskRow>,
         SELECT id, title, prompt, runner, command, workspace, status,
                worktree_path, execution_workspace, runner_session_id, base_commit, diff_stat, approved_at,
                worktree_merged_at, worktree_cleaned_at, budget_minutes,
-               policy_json, cost_ledger_json, created_at, updated_at
+               policy_json, effective_policy_json, cost_ledger_json, created_at, updated_at
         FROM tasks
         WHERE id = ?
         "#,
@@ -296,6 +302,7 @@ pub async fn load_task_row(db: &SqlitePool, id: Uuid) -> Result<Option<TaskRow>,
         status: row.get("status"),
         budget_minutes: row.get("budget_minutes"),
         policy_json: row.get("policy_json"),
+        effective_policy_json: row.get("effective_policy_json"),
         cost_ledger_json: row.get("cost_ledger_json"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
@@ -423,6 +430,28 @@ pub async fn set_execution_workspace(
         .execute(db)
         .await
         .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+pub async fn set_effective_policy(
+    db: &SqlitePool,
+    task_id: Uuid,
+    policy: &TaskPolicy,
+) -> Result<(), String> {
+    let policy_json = serde_json::to_string(policy).map_err(|error| error.to_string())?;
+    sqlx::query(
+        r#"
+        UPDATE tasks
+        SET effective_policy_json = COALESCE(effective_policy_json, ?), updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(policy_json)
+    .bind(Utc::now().to_rfc3339())
+    .bind(task_id.to_string())
+    .execute(db)
+    .await
+    .map_err(|error| error.to_string())?;
     Ok(())
 }
 

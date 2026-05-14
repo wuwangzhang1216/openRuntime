@@ -22,6 +22,7 @@ pub struct Task {
     pub status: TaskStatus,
     pub budget_minutes: u32,
     pub policy: TaskPolicy,
+    pub effective_policy: Option<TaskPolicy>,
     pub cost_ledger: CostLedger,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -116,7 +117,13 @@ impl Default for NetworkMode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl Task {
+    pub fn execution_policy(&self) -> &TaskPolicy {
+        self.effective_policy.as_ref().unwrap_or(&self.policy)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskPolicy {
     #[serde(default)]
     pub allow_network: bool,
@@ -334,6 +341,7 @@ pub struct TaskRow {
     pub status: String,
     pub budget_minutes: i64,
     pub policy_json: String,
+    pub effective_policy_json: Option<String>,
     pub cost_ledger_json: Option<String>,
     pub created_at: String,
     pub updated_at: String,

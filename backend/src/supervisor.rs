@@ -31,6 +31,18 @@ impl Supervisor {
             return Err("task is already running".to_string());
         }
 
+        if task.effective_policy.is_none() {
+            task_store::set_effective_policy(db, id, &task.policy).await?;
+            task_store::insert_event(
+                db,
+                id,
+                EventKind::Lifecycle,
+                "Effective policy snapshot frozen for this task".to_string(),
+            )
+            .await?;
+            task = task_store::load_task(db, id).await?.unwrap_or(task);
+        }
+
         if let Err(message) = policy_engine::validate_task(&task) {
             task_store::update_status(
                 db,
@@ -46,6 +58,20 @@ impl Supervisor {
         let execution_workspace = worktree_review::prepare_execution_workspace(db, id).await?;
         task_store::set_execution_workspace(db, id, &execution_workspace).await?;
         task = task_store::load_task(db, id).await?.unwrap_or(task);
+
+        if let Err(message) =
+            policy_engine::validate_execution_workspace(&task, &execution_workspace)
+        {
+            task_store::update_status(
+                db,
+                id,
+                TaskStatus::NeedsInput,
+                EventKind::Error,
+                message.clone(),
+            )
+            .await?;
+            return Err(message);
+        }
 
         if task.runner_session_id.is_none() {
             if let Some(session_id) = runner_adapters::initial_runner_session_id(&task) {
@@ -93,7 +119,7 @@ impl Supervisor {
                 db.clone(),
                 id,
                 task.runner.clone(),
-                task.policy.clone(),
+                task.execution_policy().clone(),
                 stdout,
                 EventKind::Stdout,
             );
@@ -104,7 +130,7 @@ impl Supervisor {
                 db.clone(),
                 id,
                 task.runner.clone(),
-                task.policy.clone(),
+                task.execution_policy().clone(),
                 stderr,
                 EventKind::Stderr,
             );
@@ -119,7 +145,7 @@ impl Supervisor {
             self.children.clone(),
             db.clone(),
             id,
-            task.policy
+            task.execution_policy()
                 .max_runtime_minutes
                 .unwrap_or(task.budget_minutes),
         );
@@ -161,13 +187,25 @@ impl Supervisor {
                 if let Err(error) = stdin.write_all(reply.as_bytes()).await {
                     drop(children);
                     let error = format!("failed to send reply: {error}");
-                    task_store::insert_event(db, id, EventKind::Error, error.clone()).await?;
+                    task_store::insert_event(
+                        db,
+                        id,
+                        EventKind::Error,
+                        policy_engine::redact_secrets(&error, task.execution_policy()),
+                    )
+                    .await?;
                     return Err(error);
                 }
                 if let Err(error) = stdin.flush().await {
                     drop(children);
                     let error = format!("failed to flush reply: {error}");
-                    task_store::insert_event(db, id, EventKind::Error, error.clone()).await?;
+                    task_store::insert_event(
+                        db,
+                        id,
+                        EventKind::Error,
+                        policy_engine::redact_secrets(&error, task.execution_policy()),
+                    )
+                    .await?;
                     return Err(error);
                 }
                 drop(children);
@@ -175,7 +213,10 @@ impl Supervisor {
                     db,
                     id,
                     EventKind::Input,
-                    format!("User reply: {message}"),
+                    policy_engine::redact_secrets(
+                        &format!("User reply: {message}"),
+                        task.execution_policy(),
+                    ),
                 )
                 .await?;
                 return Ok(());
@@ -192,7 +233,13 @@ impl Supervisor {
         {
             Ok(command) => command,
             Err(error) => {
-                task_store::insert_event(db, id, EventKind::Error, error.clone()).await?;
+                task_store::insert_event(
+                    db,
+                    id,
+                    EventKind::Error,
+                    policy_engine::redact_secrets(&error, task.execution_policy()),
+                )
+                .await?;
                 return Err(error);
             }
         }) else {
@@ -212,7 +259,13 @@ impl Supervisor {
         let mut child = match child {
             Ok(child) => child,
             Err(error) => {
-                task_store::insert_event(db, id, EventKind::Error, error.clone()).await?;
+                task_store::insert_event(
+                    db,
+                    id,
+                    EventKind::Error,
+                    policy_engine::redact_secrets(&error, task.execution_policy()),
+                )
+                .await?;
                 return Err(error);
             }
         };
@@ -222,7 +275,7 @@ impl Supervisor {
                 db.clone(),
                 id,
                 task.runner.clone(),
-                task.policy.clone(),
+                task.execution_policy().clone(),
                 stdout,
                 EventKind::Stdout,
             );
@@ -233,7 +286,7 @@ impl Supervisor {
                 db.clone(),
                 id,
                 task.runner.clone(),
-                task.policy.clone(),
+                task.execution_policy().clone(),
                 stderr,
                 EventKind::Stderr,
             );
@@ -247,13 +300,21 @@ impl Supervisor {
             self.children.clone(),
             db.clone(),
             id,
-            task.policy
+            task.execution_policy()
                 .max_runtime_minutes
                 .unwrap_or(task.budget_minutes),
         );
 
-        task_store::insert_event(db, id, EventKind::Input, format!("User reply: {message}"))
-            .await?;
+        task_store::insert_event(
+            db,
+            id,
+            EventKind::Input,
+            policy_engine::redact_secrets(
+                &format!("User reply: {message}"),
+                task.execution_policy(),
+            ),
+        )
+        .await?;
         task_store::insert_event(
             db,
             id,

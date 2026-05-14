@@ -60,6 +60,24 @@ pub async fn prepare_execution_workspace(db: &SqlitePool, task_id: Uuid) -> Resu
 
     if let Some(worktree_path) = &task.worktree_path {
         if FsPath::new(worktree_path).exists() {
+            if let Ok(root) =
+                git_output_lossy(&task.workspace, &["rev-parse", "--show-toplevel"]).await
+            {
+                let execution_workspace =
+                    execution_workspace_for_worktree(&task.workspace, root.trim(), worktree_path);
+                if FsPath::new(&execution_workspace).exists() {
+                    return Ok(execution_workspace);
+                }
+            }
+
+            if let Some(execution_workspace) = task.execution_workspace.as_deref() {
+                if FsPath::new(execution_workspace).exists()
+                    && FsPath::new(execution_workspace).starts_with(worktree_path)
+                {
+                    return Ok(execution_workspace.to_string());
+                }
+            }
+
             return Ok(worktree_path.clone());
         }
     }
@@ -145,6 +163,24 @@ pub async fn prepare_execution_workspace(db: &SqlitePool, task_id: Uuid) -> Resu
         .join(relative_workspace)
         .to_string_lossy()
         .to_string())
+}
+
+fn execution_workspace_for_worktree(
+    selected_workspace: &str,
+    repo_root: &str,
+    worktree_root: &str,
+) -> String {
+    let repo_root = PathBuf::from(repo_root);
+    let selected_workspace = PathBuf::from(selected_workspace);
+    let relative_workspace = selected_workspace
+        .strip_prefix(&repo_root)
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::new());
+
+    PathBuf::from(worktree_root)
+        .join(relative_workspace)
+        .to_string_lossy()
+        .to_string()
 }
 
 pub async fn capture_task_diff(db: &SqlitePool, task_id: Uuid) -> Result<bool, String> {
@@ -467,5 +503,17 @@ mod tests {
     fn diff_summary_omits_empty_parts() {
         assert_eq!(diff_summary("M src/main.rs", ""), "M src/main.rs");
         assert_eq!(diff_summary("M a", "a | 1 +"), "M a\n\na | 1 +");
+    }
+
+    #[test]
+    fn execution_workspace_preserves_repo_subdirectory() {
+        assert_eq!(
+            execution_workspace_for_worktree(
+                "/repo/frontend",
+                "/repo",
+                "/repo/.openruntime/worktrees/task"
+            ),
+            "/repo/.openruntime/worktrees/task/frontend"
+        );
     }
 }

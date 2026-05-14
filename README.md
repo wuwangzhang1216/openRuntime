@@ -49,6 +49,8 @@ reviewed through the diff surface, merged back, and cleaned up.
 - Applies local execution boundaries for workspace access, file/tool allowlists,
   network mode, secret redaction, approval requirements, and blocked command
   fragments.
+- Freezes an effective policy snapshot when a task starts so execution and audit
+  use the same boundary.
 - Creates isolated git worktrees for repo-backed workspaces.
 - Persists the exact execution workspace used by each task, including repo
   subdirectories inside isolated worktrees.
@@ -196,6 +198,7 @@ openRuntime currently includes local policy checks for:
   stash;
 - secret-sensitive command fragments and environment access;
 - explicit human approval before task start;
+- immutable effective policy snapshots at task start;
 - workspace allowlists;
 - file glob and MCP/tool allowlists passed into runner environments;
 - network mode hints passed into runner environments;

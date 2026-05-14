@@ -102,6 +102,7 @@ type Task = {
   status: TaskStatus;
   budget_minutes: number;
   policy: TaskPolicy;
+  effective_policy: TaskPolicy | null;
   cost_ledger: CostLedger;
   created_at: string;
   updated_at: string;
@@ -1390,6 +1391,11 @@ function SessionInspector({ task }: { task?: Task }) {
   const latest = latestReadableEvent(task);
   const isolated = Boolean(task.worktree_path);
   const workspaceIsolationDisabled = isWorkspaceIsolationDisabled(task);
+  const policy = task.effective_policy ?? task.policy;
+  const policyFrozen = Boolean(task.effective_policy);
+  const networkMode = policy.allow_network
+    ? "enabled"
+    : (policy.network_mode ?? "disabled");
   const progress = [
     { label: "Create agent session", done: true },
     {
@@ -1487,32 +1493,47 @@ function SessionInspector({ task }: { task?: Task }) {
       </InspectorSection>
 
       <InspectorSection title="Guardrails">
+        <InspectorItem
+          icon={<ShieldCheck className="size-5" />}
+          label={policyFrozen ? "Effective policy" : "Draft policy"}
+          value={policyFrozen ? "Frozen at task start" : "Will freeze when started"}
+        />
         <GuardrailItem
           icon={<Wifi className="size-5" />}
-          label="Network"
-          enabled={task.policy.allow_network}
+          label={`Network ${networkMode}`}
+          enabled={networkMode !== "disabled"}
         />
         <GuardrailItem
           icon={<GitBranch className="size-5" />}
           label="Git write"
-          enabled={task.policy.allow_git_write}
+          enabled={policy.allow_git_write}
         />
         <GuardrailItem
           icon={<KeyRound className="size-5" />}
           label="Secrets"
-          enabled={task.policy.allow_secrets}
+          enabled={policy.allow_secrets}
         />
         <GuardrailItem
           icon={<Ban className="size-5" />}
           label="Approval gate"
-          enabled={task.policy.require_approval}
+          enabled={policy.require_approval}
           enabledLabel="required"
           disabledLabel="not required"
         />
         <InspectorItem
           icon={<Shield className="size-5" />}
-          label={`${task.policy.blocked_commands.length} blocked fragments`}
-          value={task.policy.blocked_commands.join(", ") || "None"}
+          label={`${policy.blocked_commands.length} blocked fragments`}
+          value={policy.blocked_commands.join(", ") || "None"}
+        />
+        <InspectorItem
+          icon={<Folder className="size-5" />}
+          label={`${policy.allowed_workspaces?.length ?? 0} allowed workspaces`}
+          value={policy.allowed_workspaces?.join(", ") || "Current workspace"}
+        />
+        <InspectorItem
+          icon={<Shield className="size-5" />}
+          label={`${policy.allowed_mcp_tools?.length ?? 0} allowed tools`}
+          value={policy.allowed_mcp_tools?.join(", ") || "No MCP/tool allowlist"}
         />
       </InspectorSection>
 
