@@ -3,7 +3,7 @@ use crate::{
     policy_engine,
 };
 use axum::http::StatusCode;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{
     env,
     ffi::OsString,
@@ -26,9 +26,12 @@ pub struct RunnerSessionCommand {
 pub struct ParsedRunnerLine {
     pub kind: EventKind,
     pub message: String,
+    pub event_type: String,
     pub needs_input: bool,
+    pub needs_input_reason: Option<String>,
     pub cost_delta: CostLedger,
     pub session_id: Option<String>,
+    pub metadata: Value,
 }
 
 pub fn list_runners() -> Vec<RunnerInfo> {
@@ -103,6 +106,7 @@ pub fn build_runner_command(
                 .arg("-p")
                 .arg("--output-format")
                 .arg("stream-json")
+                .arg("--verbose")
                 .arg("--session-id")
                 .arg(session_id)
                 .arg(&task.prompt)
@@ -163,6 +167,7 @@ pub fn build_session_reply_command(
                 .arg(session_id)
                 .arg("--output-format")
                 .arg("stream-json")
+                .arg("--verbose")
                 .arg(message)
                 .current_dir(cwd);
             for (name, value) in policy_engine::execution_env(task.execution_policy()) {
@@ -218,7 +223,7 @@ pub fn parse_runner_output(
     match runner {
         RunnerKind::Codex => parse_codex_json_line(line, fallback_kind),
         RunnerKind::ClaudeCode => parse_claude_line(line, fallback_kind),
-        RunnerKind::Shell => parse_plain_line(line, fallback_kind),
+        RunnerKind::Shell => parse_plain_line("shell", line, fallback_kind),
     }
 }
 
@@ -238,18 +243,14 @@ pub fn find_executable(name: &str) -> Option<PathBuf> {
 
 fn parse_codex_json_line(line: &str, fallback_kind: EventKind) -> ParsedRunnerLine {
     let Ok(value) = serde_json::from_str::<Value>(line) else {
-        return parse_plain_line(line, fallback_kind);
+        return parse_plain_line("codex", line, fallback_kind);
     };
 
     let event_type = string_field(&value, &["type", "event", "kind"]).unwrap_or("codex-event");
     let message = string_field(&value, &["message", "text", "delta", "content"])
         .map(str::to_string)
         .unwrap_or_else(|| compact_json(&value));
-    let needs_input = looks_like_needs_input(&message)
-        || matches!(
-            event_type,
-            "approval_request" | "user_input_request" | "needs_input"
-        );
+    let needs_input = structured_needs_input(&value, event_type);
     let mut cost_delta = CostLedger::default();
 
     if let Some(usage) = value.get("usage") {
@@ -264,10 +265,19 @@ fn parse_codex_json_line(line: &str, fallback_kind: EventKind) -> ParsedRunnerLi
     ParsedRunnerLine {
         kind: fallback_kind,
         message: format!("{event_type}: {message}"),
+        event_type: event_type.to_string(),
         needs_input,
-        cost_delta,
+        needs_input_reason: needs_input.then(|| message.clone()),
+        cost_delta: cost_delta.clone(),
         session_id: string_field(&value, &["session_id", "sessionId", "conversation_id"])
             .map(str::to_string),
+        metadata: json!({
+            "category": "runner-output",
+            "runner": "codex",
+            "event_type": event_type,
+            "needs_input": needs_input,
+            "cost_delta": cost_delta.clone(),
+        }),
     }
 }
 
@@ -276,25 +286,43 @@ fn parse_claude_line(line: &str, fallback_kind: EventKind) -> ParsedRunnerLine {
         let message = string_field(&value, &["message", "text", "content", "delta"])
             .map(str::to_string)
             .unwrap_or_else(|| compact_json(&value));
+        let event_type = string_field(&value, &["type", "event", "kind"]).unwrap_or("claude-event");
+        let needs_input = structured_needs_input(&value, event_type);
         return ParsedRunnerLine {
             kind: fallback_kind,
-            needs_input: looks_like_needs_input(&message),
+            event_type: event_type.to_string(),
+            needs_input,
+            needs_input_reason: needs_input.then(|| message.clone()),
             session_id: string_field(&value, &["session_id", "sessionId"]).map(str::to_string),
+            metadata: json!({
+                "category": "runner-output",
+                "runner": "claude-code",
+                "event_type": event_type,
+                "needs_input": needs_input,
+            }),
             message,
             cost_delta: CostLedger::default(),
         };
     }
 
-    parse_plain_line(line, fallback_kind)
+    parse_plain_line("claude-code", line, fallback_kind)
 }
 
-fn parse_plain_line(line: &str, fallback_kind: EventKind) -> ParsedRunnerLine {
+fn parse_plain_line(runner: &str, line: &str, fallback_kind: EventKind) -> ParsedRunnerLine {
     ParsedRunnerLine {
         kind: fallback_kind,
         message: line.to_string(),
+        event_type: "plain".to_string(),
         needs_input: looks_like_needs_input(line),
+        needs_input_reason: looks_like_needs_input(line).then(|| line.to_string()),
         cost_delta: CostLedger::default(),
         session_id: extract_session_id(line),
+        metadata: json!({
+            "category": "runner-output",
+            "runner": runner,
+            "event_type": "plain",
+            "needs_input": looks_like_needs_input(line),
+        }),
     }
 }
 
@@ -305,13 +333,25 @@ fn looks_like_needs_input(message: &str) -> bool {
         "waiting for input",
         "approval required",
         "requires approval",
+        "permission required",
+        "requires permission",
+        "waiting for permission",
         "do you want to proceed",
         "continue?",
         "proceed?",
-        "permission",
     ]
     .iter()
     .any(|needle| lower.contains(needle))
+}
+
+fn structured_needs_input(value: &Value, event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "approval_request" | "permission_request" | "user_input_request" | "needs_input"
+    ) || value
+        .get("needs_input")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn extract_session_id(line: &str) -> Option<String> {
@@ -370,6 +410,52 @@ mod tests {
     }
 
     #[test]
+    fn does_not_treat_permission_mentions_as_needs_input() {
+        let parsed = parse_runner_output(
+            &RunnerKind::Codex,
+            EventKind::Stdout,
+            r#"{"type":"item.completed","message":"unclear permissions and scattered logs"}"#,
+        );
+
+        assert!(!parsed.needs_input);
+    }
+
+    #[test]
+    fn codex_structured_output_does_not_scan_embedded_content_for_needs_input() {
+        let parsed = parse_runner_output(
+            &RunnerKind::Codex,
+            EventKind::Stdout,
+            r#"{"type":"item.completed","message":"README says tasks can be needs input or completed"}"#,
+        );
+
+        assert!(!parsed.needs_input);
+    }
+
+    #[test]
+    fn claude_structured_output_does_not_scan_embedded_content_for_needs_input() {
+        let parsed = parse_runner_output(
+            &RunnerKind::ClaudeCode,
+            EventKind::Stdout,
+            r#"{"type":"assistant","message":"README says tasks can be needs input or completed"}"#,
+        );
+
+        assert!(!parsed.needs_input);
+    }
+
+    #[test]
+    fn plain_fallback_preserves_runner_metadata() {
+        let parsed = parse_runner_output(&RunnerKind::Codex, EventKind::Stdout, "plain output");
+
+        assert_eq!(
+            parsed
+                .metadata
+                .get("runner")
+                .and_then(|value| value.as_str()),
+            Some("codex")
+        );
+    }
+
+    #[test]
     fn exposes_claude_attach_display() {
         let task = Task {
             id: uuid::Uuid::nil(),
@@ -394,6 +480,8 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             events: Vec::new(),
+            attempts: Vec::new(),
+            current_attempt: None,
         };
 
         assert_eq!(
@@ -427,6 +515,8 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             events: Vec::new(),
+            attempts: Vec::new(),
+            current_attempt: None,
         };
 
         assert_eq!(
@@ -463,6 +553,8 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             events: Vec::new(),
+            attempts: Vec::new(),
+            current_attempt: None,
         };
 
         assert_eq!(

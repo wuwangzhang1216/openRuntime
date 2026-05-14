@@ -507,6 +507,8 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             events: Vec::new(),
+            attempts: Vec::new(),
+            current_attempt: None,
         };
 
         assert!(

@@ -43,7 +43,10 @@ reviewed through the diff surface, merged back, and cleaned up.
 - Tracks task lifecycle states: queued, running, needs input, ready for review,
   completed, failed, and stopped.
 - Stores task metadata and event history in local SQLite.
-- Captures lifecycle, stdout, stderr, input, diff, and error events.
+- Captures lifecycle, stdout, stderr, input, diff, and error events with
+  structured metadata.
+- Records task attempts for each start/resume so restarts have separate status,
+  runtime, exit, and blocking context.
 - Tracks runner session ids and exposes attach/log surfaces for agent sessions.
 - Supports runtime budgets so long-running sessions can be stopped.
 - Applies local execution boundaries for workspace access, file/tool allowlists,
@@ -159,7 +162,7 @@ still accepted as a fallback.
 | --- | --- | --- |
 | Shell | `/bin/sh -lc <command>` | Keeps stdin open so replies can be sent into interactive shell sessions. |
 | Codex | `codex exec --json --skip-git-repo-check -s workspace-write -C <workspace> <goal>` | Streams JSON events and runs against the selected execution workspace. Codex attach commands are shown when a session id is captured, but non-interactive resume replies are not exposed by the CLI yet. |
-| Claude Code | `claude -p --output-format stream-json --session-id <task-id> <goal>` | Streams JSON events, records a stable session id, and can resume with `claude -p --resume <session-id> <reply>`. Requires the `claude` CLI to be available in `PATH`. |
+| Claude Code | `claude -p --output-format stream-json --verbose --session-id <task-id> <goal>` | Streams JSON events, records a stable session id, and can resume with `claude -p --resume <session-id> --output-format stream-json --verbose <reply>`. Requires the `claude` CLI to be available in `PATH`. |
 
 When a selected workspace is a subdirectory of a git repository, openRuntime
 creates a worktree at the repository root and persists the nested execution
@@ -256,7 +259,7 @@ npm run build
 
 openRuntime is an early, working prototype. The current focus is the local
 single-user control plane: real agent execution, worktree isolation, task
-persistence, and review workflows.
+persistence, structured event history, task attempts, and review workflows.
 
 Planned areas:
 

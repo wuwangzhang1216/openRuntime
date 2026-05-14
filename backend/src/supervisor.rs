@@ -2,6 +2,7 @@ use crate::{
     models::{CostLedger, EventKind, TaskStatus},
     policy_engine, runner_adapters, task_store, worktree_review,
 };
+use serde_json::json;
 use sqlx::SqlitePool;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{
@@ -19,6 +20,7 @@ pub struct Supervisor {
 struct RunningProcess {
     child: Child,
     stdin: Option<ChildStdin>,
+    attempt_id: Uuid,
 }
 
 impl Supervisor {
@@ -27,7 +29,9 @@ impl Supervisor {
             .await?
             .ok_or_else(|| "task not found".to_string())?;
 
-        if task.status == TaskStatus::Running {
+        if self.children.lock().await.contains_key(&id)
+            || matches!(task.status, TaskStatus::Running | TaskStatus::NeedsInput)
+        {
             return Err("task is already running".to_string());
         }
 
@@ -91,15 +95,7 @@ impl Supervisor {
             .map_err(|message| {
                 format!("Cannot start {} runner: {message}", task.runner.as_str())
             })?;
-
-        task_store::update_status(
-            db,
-            id,
-            TaskStatus::Running,
-            EventKind::Lifecycle,
-            format!("Starting {} runner in {execution_workspace}", runner.label),
-        )
-        .await?;
+        let attempt = task_store::create_attempt(db, &task, &execution_workspace).await?;
 
         runner.command.stdout(std::process::Stdio::piped());
         runner.command.stderr(std::process::Stdio::piped());
@@ -109,15 +105,81 @@ impl Supervisor {
             std::process::Stdio::null()
         });
 
-        let mut child = runner
+        let child = runner
             .command
             .spawn()
-            .map_err(|error| format!("failed to start command: {error}"))?;
+            .map_err(|error| format!("failed to start command: {error}"));
+        let mut child = match child {
+            Ok(child) => child,
+            Err(error) => {
+                let redacted_error = policy_engine::redact_secrets(&error, task.execution_policy());
+                task_store::insert_event_for_attempt(
+                    db,
+                    id,
+                    Some(attempt.id),
+                    EventKind::Error,
+                    redacted_error.clone(),
+                    json!({
+                        "category": "attempt-start-failed",
+                        "attempt_id": attempt.id,
+                        "attempt_number": attempt.attempt_number,
+                        "error": redacted_error,
+                    }),
+                )
+                .await?;
+                task_store::finish_attempt(
+                    db,
+                    attempt.id,
+                    TaskStatus::Failed,
+                    None,
+                    Some(policy_engine::redact_secrets(
+                        &error,
+                        task.execution_policy(),
+                    )),
+                )
+                .await?;
+                let redacted_error = policy_engine::redact_secrets(&error, task.execution_policy());
+                task_store::update_status_for_attempt(
+                    db,
+                    id,
+                    Some(attempt.id),
+                    TaskStatus::Failed,
+                    EventKind::Error,
+                    "Runner process failed to start".to_string(),
+                    json!({
+                        "category": "attempt-failed",
+                        "attempt_id": attempt.id,
+                        "attempt_number": attempt.attempt_number,
+                        "error": redacted_error,
+                    }),
+                )
+                .await?;
+                return Err(error);
+            }
+        };
+
+        task_store::update_status_for_attempt(
+            db,
+            id,
+            Some(attempt.id),
+            TaskStatus::Running,
+            EventKind::Lifecycle,
+            format!("Starting {} runner in {execution_workspace}", runner.label),
+            json!({
+                "category": "attempt-started",
+                "attempt_id": attempt.id,
+                "attempt_number": attempt.attempt_number,
+                "runner": task.runner.as_str(),
+                "execution_workspace": execution_workspace,
+            }),
+        )
+        .await?;
 
         if let Some(stdout) = child.stdout.take() {
             spawn_output_reader(
                 db.clone(),
                 id,
+                attempt.id,
                 task.runner.clone(),
                 task.execution_policy().clone(),
                 stdout,
@@ -129,6 +191,7 @@ impl Supervisor {
             spawn_output_reader(
                 db.clone(),
                 id,
+                attempt.id,
                 task.runner.clone(),
                 task.execution_policy().clone(),
                 stderr,
@@ -137,14 +200,19 @@ impl Supervisor {
         }
 
         let stdin = runner.keep_stdin.then(|| child.stdin.take()).flatten();
-        self.children
-            .lock()
-            .await
-            .insert(id, RunningProcess { child, stdin });
+        self.children.lock().await.insert(
+            id,
+            RunningProcess {
+                child,
+                stdin,
+                attempt_id: attempt.id,
+            },
+        );
         spawn_task_monitor(
             self.children.clone(),
             db.clone(),
             id,
+            attempt.id,
             task.execution_policy()
                 .max_runtime_minutes
                 .unwrap_or(task.budget_minutes),
@@ -155,6 +223,7 @@ impl Supervisor {
 
     pub async fn stop(&self, db: &SqlitePool, id: Uuid) -> Result<(), String> {
         let mut process = self.children.lock().await.remove(&id);
+        let attempt_id = process.as_ref().map(|process| process.attempt_id);
 
         if let Some(process) = process.as_mut() {
             process
@@ -166,12 +235,29 @@ impl Supervisor {
 
         worktree_review::capture_task_diff(db, id).await?;
 
-        task_store::update_status(
+        if let Some(attempt_id) = attempt_id {
+            task_store::finish_attempt(
+                db,
+                attempt_id,
+                TaskStatus::Stopped,
+                None,
+                Some("Task stopped by user".to_string()),
+            )
+            .await?;
+        }
+
+        task_store::update_status_for_attempt(
             db,
             id,
+            attempt_id,
             TaskStatus::Stopped,
             EventKind::Lifecycle,
             "Task stopped by user".to_string(),
+            json!({
+                "category": "attempt-stopped",
+                "attempt_id": attempt_id,
+                "reason": "user",
+            }),
         )
         .await
     }
@@ -182,16 +268,25 @@ impl Supervisor {
             .ok_or_else(|| "task not found".to_string())?;
         let mut children = self.children.lock().await;
         if let Some(process) = children.get_mut(&id) {
+            let attempt_id = process.attempt_id;
             if let Some(stdin) = process.stdin.as_mut() {
                 let reply = format!("{message}\n");
                 if let Err(error) = stdin.write_all(reply.as_bytes()).await {
                     drop(children);
                     let error = format!("failed to send reply: {error}");
-                    task_store::insert_event(
+                    let redacted_error =
+                        policy_engine::redact_secrets(&error, task.execution_policy());
+                    task_store::insert_event_for_attempt(
                         db,
                         id,
+                        Some(attempt_id),
                         EventKind::Error,
-                        policy_engine::redact_secrets(&error, task.execution_policy()),
+                        redacted_error.clone(),
+                        json!({
+                            "category": "reply-error",
+                            "attempt_id": attempt_id,
+                            "error": redacted_error,
+                        }),
                     )
                     .await?;
                     return Err(error);
@@ -199,24 +294,41 @@ impl Supervisor {
                 if let Err(error) = stdin.flush().await {
                     drop(children);
                     let error = format!("failed to flush reply: {error}");
-                    task_store::insert_event(
+                    let redacted_error =
+                        policy_engine::redact_secrets(&error, task.execution_policy());
+                    task_store::insert_event_for_attempt(
                         db,
                         id,
+                        Some(attempt_id),
                         EventKind::Error,
-                        policy_engine::redact_secrets(&error, task.execution_policy()),
+                        redacted_error.clone(),
+                        json!({
+                            "category": "reply-error",
+                            "attempt_id": attempt_id,
+                            "error": redacted_error,
+                        }),
                     )
                     .await?;
                     return Err(error);
                 }
                 drop(children);
-                task_store::insert_event(
+                task_store::mark_attempt_status(db, attempt_id, TaskStatus::Running, None).await?;
+                task_store::update_status_for_attempt(
                     db,
                     id,
+                    Some(attempt_id),
+                    TaskStatus::Running,
                     EventKind::Input,
                     policy_engine::redact_secrets(
                         &format!("User reply: {message}"),
                         task.execution_policy(),
                     ),
+                    json!({
+                        "category": "reply",
+                        "attempt_id": attempt_id,
+                        "delivery": "stdin",
+                        "clears_status": "needs-input",
+                    }),
                 )
                 .await?;
                 return Ok(());
@@ -224,7 +336,19 @@ impl Supervisor {
 
             drop(children);
             let error = live_runner_reply_unavailable_message();
-            task_store::insert_event(db, id, EventKind::Error, error.to_string()).await?;
+            task_store::insert_event_for_attempt(
+                db,
+                id,
+                Some(attempt_id),
+                EventKind::Error,
+                error.to_string(),
+                json!({
+                    "category": "reply-error",
+                    "attempt_id": attempt_id,
+                    "reason": "live-runner-has-no-stdin",
+                }),
+            )
+            .await?;
             return Err(error.to_string());
         }
         drop(children);
@@ -251,6 +375,13 @@ impl Supervisor {
         command.command.stdout(std::process::Stdio::piped());
         command.command.stderr(std::process::Stdio::piped());
         command.command.stdin(std::process::Stdio::null());
+        let execution_workspace = task
+            .execution_workspace
+            .as_deref()
+            .or(task.worktree_path.as_deref())
+            .unwrap_or(&task.workspace)
+            .to_string();
+        let attempt = task_store::create_attempt(db, &task, &execution_workspace).await?;
 
         let child = command
             .command
@@ -259,11 +390,29 @@ impl Supervisor {
         let mut child = match child {
             Ok(child) => child,
             Err(error) => {
-                task_store::insert_event(
+                let redacted_error = policy_engine::redact_secrets(&error, task.execution_policy());
+                task_store::insert_event_for_attempt(
                     db,
                     id,
+                    Some(attempt.id),
                     EventKind::Error,
-                    policy_engine::redact_secrets(&error, task.execution_policy()),
+                    redacted_error.clone(),
+                    json!({
+                        "category": "attempt-start-failed",
+                        "attempt_id": attempt.id,
+                        "error": redacted_error,
+                    }),
+                )
+                .await?;
+                task_store::finish_attempt(
+                    db,
+                    attempt.id,
+                    TaskStatus::Failed,
+                    None,
+                    Some(policy_engine::redact_secrets(
+                        &error,
+                        task.execution_policy(),
+                    )),
                 )
                 .await?;
                 return Err(error);
@@ -274,6 +423,7 @@ impl Supervisor {
             spawn_output_reader(
                 db.clone(),
                 id,
+                attempt.id,
                 task.runner.clone(),
                 task.execution_policy().clone(),
                 stdout,
@@ -285,6 +435,7 @@ impl Supervisor {
             spawn_output_reader(
                 db.clone(),
                 id,
+                attempt.id,
                 task.runner.clone(),
                 task.execution_policy().clone(),
                 stderr,
@@ -292,42 +443,68 @@ impl Supervisor {
             );
         }
 
-        self.children
-            .lock()
-            .await
-            .insert(id, RunningProcess { child, stdin: None });
+        self.children.lock().await.insert(
+            id,
+            RunningProcess {
+                child,
+                stdin: None,
+                attempt_id: attempt.id,
+            },
+        );
         spawn_task_monitor(
             self.children.clone(),
             db.clone(),
             id,
+            attempt.id,
             task.execution_policy()
                 .max_runtime_minutes
                 .unwrap_or(task.budget_minutes),
         );
 
-        task_store::insert_event(
+        task_store::insert_event_for_attempt(
             db,
             id,
+            Some(attempt.id),
             EventKind::Input,
             policy_engine::redact_secrets(
                 &format!("User reply: {message}"),
                 task.execution_policy(),
             ),
+            json!({
+                "category": "reply",
+                "attempt_id": attempt.id,
+                "delivery": "session-resume",
+            }),
         )
         .await?;
-        task_store::insert_event(
+        task_store::insert_event_for_attempt(
             db,
             id,
+            Some(attempt.id),
             EventKind::Lifecycle,
             format!("Resuming runner session with {}", command.display),
+            json!({
+                "category": "attempt-started",
+                "attempt_id": attempt.id,
+                "attempt_number": attempt.attempt_number,
+                "runner": task.runner.as_str(),
+                "execution_workspace": execution_workspace,
+                "command": command.display,
+            }),
         )
         .await?;
-        task_store::update_status(
+        task_store::update_status_for_attempt(
             db,
             id,
+            Some(attempt.id),
             TaskStatus::Running,
             EventKind::Lifecycle,
             "Runner session reply started".to_string(),
+            json!({
+                "category": "attempt-running",
+                "attempt_id": attempt.id,
+                "attempt_number": attempt.attempt_number,
+            }),
         )
         .await?;
 
@@ -342,6 +519,7 @@ fn live_runner_reply_unavailable_message() -> &'static str {
 fn spawn_output_reader<R>(
     db: SqlitePool,
     task_id: Uuid,
+    attempt_id: Uuid,
     runner: crate::models::RunnerKind,
     policy: crate::models::TaskPolicy,
     reader: R,
@@ -356,28 +534,70 @@ fn spawn_output_reader<R>(
                 runner_adapters::parse_runner_output(&runner, fallback_kind.clone(), &line);
             let message = policy_engine::redact_secrets(&parsed.message, &policy);
 
-            if let Err(error) = task_store::insert_event(&db, task_id, parsed.kind, message).await {
+            let mut metadata = parsed.metadata.clone();
+            if let Some(object) = metadata.as_object_mut() {
+                object.insert("attempt_id".to_string(), json!(attempt_id));
+                object.insert("stream".to_string(), json!(fallback_kind.as_str()));
+            }
+
+            if let Err(error) = task_store::insert_event_for_attempt(
+                &db,
+                task_id,
+                Some(attempt_id),
+                parsed.kind,
+                message,
+                metadata,
+            )
+            .await
+            {
                 eprintln!("failed to persist task output: {error}");
             }
 
             if parsed.needs_input {
-                let _ = task_store::update_status(
+                let reason = parsed
+                    .needs_input_reason
+                    .clone()
+                    .unwrap_or_else(|| "Runner requested input".to_string());
+                let reason = policy_engine::redact_secrets(&reason, &policy);
+                let _ = task_store::mark_attempt_status(
+                    &db,
+                    attempt_id,
+                    TaskStatus::NeedsInput,
+                    Some(reason.clone()),
+                )
+                .await;
+                let _ = task_store::update_status_for_attempt(
                     &db,
                     task_id,
+                    Some(attempt_id),
                     TaskStatus::NeedsInput,
                     EventKind::Lifecycle,
                     "Runner emitted a structured needs-input signal".to_string(),
+                    json!({
+                        "category": "needs-input",
+                        "attempt_id": attempt_id,
+                        "reason": reason,
+                        "source": runner.as_str(),
+                    }),
                 )
                 .await;
             }
 
             if let Some(session_id) = parsed.session_id {
                 let _ = task_store::set_runner_session_id(&db, task_id, &session_id).await;
-                let _ = task_store::insert_event(
+                let _ =
+                    task_store::set_attempt_runner_session_id(&db, attempt_id, &session_id).await;
+                let _ = task_store::insert_event_for_attempt(
                     &db,
                     task_id,
+                    Some(attempt_id),
                     EventKind::Lifecycle,
                     format!("Runner session id: {session_id}"),
+                    json!({
+                        "category": "runner-session",
+                        "attempt_id": attempt_id,
+                        "session_id": session_id,
+                    }),
                 )
                 .await;
             }
@@ -391,6 +611,7 @@ fn spawn_task_monitor(
     children: Arc<Mutex<HashMap<Uuid, RunningProcess>>>,
     db: SqlitePool,
     task_id: Uuid,
+    attempt_id: Uuid,
     budget_minutes: u32,
 ) {
     tokio::spawn(async move {
@@ -415,12 +636,29 @@ fn spawn_task_monitor(
                         },
                     )
                     .await;
-                    let _ = task_store::update_status(
+                    let _ = task_store::finish_attempt(
+                        &db,
+                        attempt_id,
+                        TaskStatus::Stopped,
+                        None,
+                        Some(format!(
+                            "Task exceeded budget of {budget_minutes} minute(s)"
+                        )),
+                    )
+                    .await;
+                    let _ = task_store::update_status_for_attempt(
                         &db,
                         task_id,
+                        Some(attempt_id),
                         TaskStatus::Stopped,
                         EventKind::Lifecycle,
                         format!("Task exceeded budget of {budget_minutes} minute(s)"),
+                        json!({
+                            "category": "attempt-stopped",
+                            "attempt_id": attempt_id,
+                            "reason": "budget-exceeded",
+                            "budget_minutes": budget_minutes,
+                        }),
                     )
                     .await;
                 }
@@ -457,16 +695,32 @@ fn spawn_task_monitor(
                         },
                     )
                     .await;
-                    let _ = task_store::update_status(
+                    let status = if has_changes {
+                        TaskStatus::ReadyForReview
+                    } else {
+                        TaskStatus::Completed
+                    };
+                    let _ = task_store::finish_attempt(
+                        &db,
+                        attempt_id,
+                        status.clone(),
+                        Some(exit_status.to_string()),
+                        Some(format!("Task completed with status {exit_status}")),
+                    )
+                    .await;
+                    let _ = task_store::update_status_for_attempt(
                         &db,
                         task_id,
-                        if has_changes {
-                            TaskStatus::ReadyForReview
-                        } else {
-                            TaskStatus::Completed
-                        },
+                        Some(attempt_id),
+                        status,
                         EventKind::Lifecycle,
                         format!("Task completed with status {exit_status}"),
+                        json!({
+                            "category": "attempt-completed",
+                            "attempt_id": attempt_id,
+                            "exit_status": exit_status.to_string(),
+                            "has_changes": has_changes,
+                        }),
                     )
                     .await;
                     return;
@@ -482,24 +736,53 @@ fn spawn_task_monitor(
                         },
                     )
                     .await;
-                    let _ = task_store::update_status(
+                    let _ = task_store::finish_attempt(
+                        &db,
+                        attempt_id,
+                        TaskStatus::Failed,
+                        Some(exit_status.to_string()),
+                        Some(format!("Task failed with status {exit_status}")),
+                    )
+                    .await;
+                    let _ = task_store::update_status_for_attempt(
                         &db,
                         task_id,
+                        Some(attempt_id),
                         TaskStatus::Failed,
                         EventKind::Lifecycle,
                         format!("Task failed with status {exit_status}"),
+                        json!({
+                            "category": "attempt-failed",
+                            "attempt_id": attempt_id,
+                            "exit_status": exit_status.to_string(),
+                        }),
                     )
                     .await;
                     return;
                 }
                 Some(Err(error)) => {
                     let _ = worktree_review::capture_task_diff(&db, task_id).await;
-                    let _ = task_store::update_status(
+                    let redacted_error = error.to_string();
+                    let _ = task_store::finish_attempt(
+                        &db,
+                        attempt_id,
+                        TaskStatus::Failed,
+                        None,
+                        Some(format!("Could not monitor task: {redacted_error}")),
+                    )
+                    .await;
+                    let _ = task_store::update_status_for_attempt(
                         &db,
                         task_id,
+                        Some(attempt_id),
                         TaskStatus::Failed,
                         EventKind::Error,
-                        format!("Could not monitor task: {error}"),
+                        format!("Could not monitor task: {redacted_error}"),
+                        json!({
+                            "category": "attempt-monitor-error",
+                            "attempt_id": attempt_id,
+                            "error": redacted_error,
+                        }),
                     )
                     .await;
                     return;

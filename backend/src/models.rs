@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::str::FromStr;
 use uuid::Uuid;
 
@@ -27,6 +28,8 @@ pub struct Task {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub events: Vec<TaskEvent>,
+    pub attempts: Vec<TaskAttempt>,
+    pub current_attempt: Option<TaskAttempt>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -197,9 +200,26 @@ pub struct CostLedger {
 pub struct TaskEvent {
     pub id: Uuid,
     pub task_id: Uuid,
+    pub attempt_id: Option<Uuid>,
     pub kind: EventKind,
     pub message: String,
+    pub metadata: Value,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskAttempt {
+    pub id: Uuid,
+    pub task_id: Uuid,
+    pub attempt_number: u32,
+    pub runner: RunnerKind,
+    pub status: TaskStatus,
+    pub execution_workspace: Option<String>,
+    pub runner_session_id: Option<String>,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub exit_status: Option<String>,
+    pub summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
