@@ -226,8 +226,9 @@ async fn ensure_column(
 }
 
 pub async fn mark_orphaned_running_tasks(db: &SqlitePool) -> Result<(), String> {
-    let rows = sqlx::query("SELECT id FROM tasks WHERE status = ?")
+    let rows = sqlx::query("SELECT id FROM tasks WHERE status IN (?, ?)")
         .bind(TaskStatus::Running.as_str())
+        .bind(TaskStatus::NeedsInput.as_str())
         .fetch_all(db)
         .await
         .map_err(|error| error.to_string())?;

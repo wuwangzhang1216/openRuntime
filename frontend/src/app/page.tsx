@@ -1072,8 +1072,8 @@ function SessionTimeline({
     );
   }
 
-  const canStart = task.status !== "running";
-  const canStop = task.status === "running";
+  const canStart = task.status !== "running" && task.status !== "needs-input";
+  const canStop = task.status === "running" || task.status === "needs-input";
   const latest = latestReadableEvent(task);
   const confirmation = pendingConfirmation
     ? confirmationDetails(task, pendingConfirmation)
@@ -1774,9 +1774,18 @@ function costLedgerSummary(ledger: CostLedger) {
 }
 
 function structuredBlockedReason(task: Task) {
+  if (!["needs-input", "failed", "stopped"].includes(task.status)) {
+    return null;
+  }
+
+  const currentAttemptId = task.current_attempt?.id ?? null;
   const event = [...task.events].reverse().find((event) => {
     const category = event.metadata?.category;
-    return (
+    const belongsToCurrentAttempt =
+      !currentAttemptId ||
+      !event.attempt_id ||
+      event.attempt_id === currentAttemptId;
+    return belongsToCurrentAttempt && (
       category === "needs-input" ||
       category === "attempt-stopped" ||
       category === "attempt-failed" ||
