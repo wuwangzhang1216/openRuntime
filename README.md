@@ -25,18 +25,18 @@ runtime layer around them.
 ![openRuntime workflow demo](docs/assets/openruntime-demo.gif)
 
 The demo above was captured from real local runs against a temporary git
-workspace. It includes a shell policy-boundary task, a Codex task, and a Claude
-Code task dispatched through the GUI, isolated into git worktrees, streamed into
-the session timeline, reviewed through the diff surface, plus a reviewed
-worktree merged and cleaned up from the UI.
+workspace. It includes live discovery of the local Codex and Claude Code session
+stores, a shell policy-boundary task dispatched through the GUI, isolated git
+worktrees, streamed timeline events, diff-first review, and a reviewed worktree
+merged and cleaned up from the UI.
 
 | Dispatch policy and runner state | Live session timeline |
 | --- | --- |
 | ![Dispatch workspace and runner state](docs/assets/openruntime-dispatch.png) | ![Running task with streamed events](docs/assets/openruntime-running.png) |
 
-| Real Codex and Claude Code sessions | Diff-first review |
+| Local Codex and Claude Code session inventory | Diff-first review |
 | --- | --- |
-| ![Real Codex and Claude Code sessions](docs/assets/openruntime-real-agents.png) | ![Diff review surface](docs/assets/openruntime-review.png) |
+| ![Local Codex and Claude Code session inventory](docs/assets/openruntime-real-agents.png) | ![Diff review surface](docs/assets/openruntime-review.png) |
 
 | Merged and cleaned worktree |
 | --- |
@@ -54,6 +54,8 @@ worktree merged and cleaned up from the UI.
 - Records task attempts for each start/resume so restarts have separate status,
   runtime, exit, and blocking context.
 - Tracks runner session ids and exposes attach/log surfaces for agent sessions.
+- Inventories local Codex and Claude Code session JSONL stores, including Claude
+  subagents, and links discovered sessions back to managed openRuntime tasks.
 - Supports runtime budgets so long-running sessions can be stopped.
 - Applies local execution boundaries for workspace access, file/tool allowlists,
   network mode, secret redaction, approval requirements, and blocked command
