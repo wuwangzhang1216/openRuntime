@@ -32,7 +32,7 @@ pub struct Task {
     pub current_attempt: Option<TaskAttempt>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "kebab-case")]
 pub enum RunnerKind {
     Shell,
