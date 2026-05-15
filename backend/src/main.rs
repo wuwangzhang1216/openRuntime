@@ -1,3 +1,4 @@
+mod local_sessions;
 mod models;
 mod policy_engine;
 mod runner_adapters;
@@ -55,6 +56,7 @@ async fn main() {
     let app = Router::new()
         .route("/health", get(health))
         .route("/runners", get(list_runners))
+        .route("/runner-sessions", get(list_local_runner_sessions))
         .route("/workspaces", get(list_workspaces))
         .route("/workspaces/pick", post(pick_workspace))
         .route("/workspaces/register", post(register_workspace))
@@ -96,6 +98,18 @@ async fn health() -> Json<HealthResponse> {
 
 async fn list_runners() -> Json<Vec<models::RunnerInfo>> {
     Json(runner_adapters::list_runners())
+}
+
+async fn list_local_runner_sessions(
+    State(state): State<AppState>,
+) -> ApiResult<local_sessions::LocalRunnerSessionsResponse> {
+    let tasks = task_store::list_tasks(&state.db)
+        .await
+        .map_err(internal_error)?;
+    tokio::task::spawn_blocking(move || local_sessions::discover(&tasks, None))
+        .await
+        .map(Json)
+        .map_err(internal_error)
 }
 
 async fn list_workspaces(State(state): State<AppState>) -> ApiResult<Vec<WorkspaceProject>> {

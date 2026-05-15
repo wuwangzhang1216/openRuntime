@@ -173,6 +173,28 @@ type TaskDiff = {
   patch: string;
 };
 
+type LocalRunnerSession = {
+  runner: RunnerKind;
+  session_id: string;
+  title: string | null;
+  workspace: string | null;
+  transcript_path: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  source: string;
+  resume_command: string | null;
+  message_count: number;
+  last_message: string | null;
+  openruntime_task_id: string | null;
+  managed_by_openruntime: boolean;
+};
+
+type LocalRunnerSessionsResponse = {
+  sessions: LocalRunnerSession[];
+  codex_home: string | null;
+  claude_home: string | null;
+};
+
 const initialForm: FormState = {
   title: "",
   prompt: "Inspect the workspace and summarize what this project currently does.",
@@ -233,6 +255,13 @@ type ConfirmableTaskAction = "stop" | "approve" | "merge" | "cleanup";
 export default function Home() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [runners, setRunners] = useState<RunnerInfo[]>([]);
+  const [localSessions, setLocalSessions] = useState<LocalRunnerSession[]>([]);
+  const [localSessionRoots, setLocalSessionRoots] =
+    useState<Pick<LocalRunnerSessionsResponse, "codex_home" | "claude_home">>({
+      codex_home: null,
+      claude_home: null,
+    });
+  const [localSessionError, setLocalSessionError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(initialForm);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -242,6 +271,7 @@ export default function Home() {
   const refreshSequence = useRef(0);
   const refreshAbort = useRef<AbortController | null>(null);
   const refreshInFlight = useRef(false);
+  const localSessionRefreshInFlight = useRef(false);
 
   const selectedTask = useMemo(
     () =>
@@ -250,6 +280,20 @@ export default function Home() {
         : tasks[0],
     [selectedId, tasks],
   );
+  const selectedLocalSession = useMemo(() => {
+    if (!selectedTask) {
+      return null;
+    }
+
+    return (
+      localSessions.find(
+        (session) =>
+          session.runner === selectedTask.runner &&
+          (session.session_id === selectedTask.runner_session_id ||
+            session.openruntime_task_id === selectedTask.id),
+      ) ?? null
+    );
+  }, [localSessions, selectedTask]);
 
   const stats = useMemo(() => {
     const running = tasks.filter((task) => task.status === "running").length;
@@ -323,6 +367,37 @@ export default function Home() {
     }
   }, []);
 
+  const refreshLocalSessions = useCallback(async () => {
+    if (localSessionRefreshInFlight.current) {
+      return;
+    }
+
+    localSessionRefreshInFlight.current = true;
+    try {
+      const response = await fetch(`${API_URL}/runner-sessions`, {
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+
+      const payload = (await response.json()) as LocalRunnerSessionsResponse;
+      setLocalSessions(payload.sessions);
+      setLocalSessionRoots({
+        codex_home: payload.codex_home,
+        claude_home: payload.claude_home,
+      });
+      setLocalSessionError(null);
+    } catch (reason) {
+      setLocalSessions([]);
+      setLocalSessionError(
+        reason instanceof Error ? reason.message : "Local runner inventory failed",
+      );
+    } finally {
+      localSessionRefreshInFlight.current = false;
+    }
+  }, []);
+
   useEffect(() => {
     async function loadRunners() {
       try {
@@ -338,17 +413,22 @@ export default function Home() {
     void loadRunners();
     const initial = window.setTimeout(() => {
       void refreshTasks(false);
+      void refreshLocalSessions();
     }, 0);
     const interval = window.setInterval(() => {
       void refreshTasks(false);
     }, 1500);
+    const sessionInterval = window.setInterval(() => {
+      void refreshLocalSessions();
+    }, 30000);
 
     return () => {
       window.clearTimeout(initial);
       window.clearInterval(interval);
+      window.clearInterval(sessionInterval);
       refreshAbort.current?.abort();
     };
-  }, [refreshTasks]);
+  }, [refreshLocalSessions, refreshTasks]);
 
   async function createAndRun(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -407,6 +487,7 @@ export default function Home() {
       }
 
       await refreshTasks();
+      await refreshLocalSessions();
     } catch (reason) {
       errorSource.current = "action";
       setError(reason instanceof Error ? reason.message : "Could not create task");
@@ -426,6 +507,7 @@ export default function Home() {
         throw new Error(await response.text());
       }
       await refreshTasks();
+      await refreshLocalSessions();
     } catch (reason) {
       errorSource.current = "action";
       setError(reason instanceof Error ? reason.message : "Task action failed");
@@ -445,6 +527,7 @@ export default function Home() {
         throw new Error(await response.text());
       }
       await refreshTasks();
+      await refreshLocalSessions();
     } catch (reason) {
       errorSource.current = "action";
       setError(reason instanceof Error ? reason.message : "Approval failed");
@@ -464,6 +547,7 @@ export default function Home() {
         throw new Error(await response.text());
       }
       await refreshTasks();
+      await refreshLocalSessions();
     } catch (reason) {
       errorSource.current = "action";
       setError(reason instanceof Error ? reason.message : "Reply failed");
@@ -482,6 +566,7 @@ export default function Home() {
         throw new Error(await response.text());
       }
       await refreshTasks();
+      await refreshLocalSessions();
     } catch (reason) {
       errorSource.current = "action";
       setError(reason instanceof Error ? reason.message : "Worktree action failed");
@@ -506,7 +591,10 @@ export default function Home() {
             <RunnerStrip runners={runners} />
             <button
               title="Refresh"
-              onClick={() => void refreshTasks()}
+              onClick={() => {
+                void refreshTasks();
+                void refreshLocalSessions();
+              }}
               className="grid size-10 place-items-center rounded-md border border-slate-200 bg-white/80 text-slate-600 shadow-[0_1px_1px_rgba(15,23,42,0.04)] transition hover:border-slate-300 hover:text-slate-950"
             >
               <RefreshCw
@@ -525,6 +613,13 @@ export default function Home() {
           isSubmitting={isSubmitting}
           onSubmit={createAndRun}
           onFormChange={setForm}
+        />
+
+        <LocalSessionShelf
+          sessions={localSessions}
+          roots={localSessionRoots}
+          error={localSessionError}
+          selectedTask={selectedTask}
         />
 
         <section className="grid min-h-[calc(100vh-250px)] gap-4 xl:grid-cols-[340px_minmax(0,1fr)_300px]">
@@ -549,7 +644,7 @@ export default function Home() {
               selectedTask && worktreeAction(selectedTask.id, "cleanup")
             }
           />
-          <SessionInspector task={selectedTask} />
+          <SessionInspector task={selectedTask} localSession={selectedLocalSession} />
         </section>
       </div>
     </main>
@@ -613,6 +708,119 @@ function RunnerStrip({ runners }: { runners: RunnerInfo[] }) {
           {runnerLabels[runner.runner]}
         </span>
       ))}
+    </div>
+  );
+}
+
+function LocalSessionShelf({
+  sessions,
+  roots,
+  error,
+  selectedTask,
+}: {
+  sessions: LocalRunnerSession[];
+  roots: Pick<LocalRunnerSessionsResponse, "codex_home" | "claude_home">;
+  error: string | null;
+  selectedTask?: Task;
+}) {
+  const managedCount = sessions.filter((session) => session.managed_by_openruntime).length;
+  const codexCount = sessions.filter((session) => session.runner === "codex").length;
+  const claudeCount = sessions.filter((session) => session.runner === "claude-code").length;
+  const visibleSessions = sessions.slice(0, 12);
+
+  return (
+    <section className="rounded-[22px] border border-slate-200/80 bg-white px-4 py-3 shadow-[0_12px_32px_rgba(15,23,42,0.04)]">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <Terminal className="size-4 text-slate-500" />
+            <h2 className="text-sm font-semibold text-slate-800">
+              Local runner sessions
+            </h2>
+            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500">
+              {sessions.length}
+            </span>
+          </div>
+          <p className="mt-1 truncate text-xs text-slate-400">
+            Codex {codexCount}, Claude Code {claudeCount}, managed {managedCount}
+          </p>
+        </div>
+        <div className="hidden min-w-0 text-right text-[11px] leading-5 text-slate-400 lg:block">
+          <div className="truncate">Codex: {roots.codex_home ?? "not found"}</div>
+          <div className="truncate">Claude: {roots.claude_home ?? "not found"}</div>
+        </div>
+      </div>
+
+      {error ? (
+        <div className="mt-3 rounded-md border border-amber-200 bg-[#fff8e7] px-3 py-2 text-xs text-amber-800">
+          {error}
+        </div>
+      ) : null}
+
+      <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
+        {visibleSessions.length > 0 ? (
+          visibleSessions.map((session) => (
+            <LocalSessionCard
+              key={`${session.runner}-${session.session_id}-${session.transcript_path}`}
+              session={session}
+              selected={
+                Boolean(selectedTask?.runner_session_id) &&
+                selectedTask?.runner === session.runner &&
+                selectedTask?.runner_session_id === session.session_id
+              }
+            />
+          ))
+        ) : (
+          <div className="flex h-20 min-w-full items-center justify-center text-sm text-slate-400">
+            No Codex or Claude Code sessions discovered yet
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function LocalSessionCard({
+  session,
+  selected,
+}: {
+  session: LocalRunnerSession;
+  selected: boolean;
+}) {
+  return (
+    <div
+      className={`min-w-[260px] max-w-[260px] rounded-md border px-3 py-2 ${
+        selected
+          ? "border-slate-400 bg-slate-50"
+          : "border-slate-200 bg-white"
+      }`}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span
+              className={`size-2 rounded-full ${
+                session.managed_by_openruntime ? "bg-emerald-500" : "bg-slate-300"
+              }`}
+            />
+            <div className="truncate text-sm font-medium text-slate-800">
+              {session.title ?? session.last_message ?? session.session_id}
+            </div>
+          </div>
+          <div className="mt-1 truncate text-[11px] text-slate-400">
+            {runnerLabels[session.runner]} · {session.message_count} messages
+          </div>
+        </div>
+        <div className="shrink-0 text-right text-[11px] text-slate-400">
+          {session.updated_at ? formatTime(session.updated_at) : "unknown"}
+        </div>
+      </div>
+      <div className="mt-2 line-clamp-2 min-h-10 break-words text-xs leading-5 text-slate-500">
+        {session.last_message ?? "No safe preview available"}
+      </div>
+      <div className="mt-2 truncate font-mono text-[11px] text-slate-400">
+        {session.resume_command ?? session.session_id}
+      </div>
     </div>
   );
 }
@@ -1218,7 +1426,7 @@ function SessionInputPanel({
     !task.approved_at &&
     task.status === "needs-input";
   const canReply =
-    task.runner === "shell" &&
+    (task.runner === "shell" || task.runner === "claude-code") &&
     (task.status === "running" || task.status === "needs-input");
 
   if (!canApprove && !canReply) {
@@ -1429,7 +1637,13 @@ function DiffReview({
   );
 }
 
-function SessionInspector({ task }: { task?: Task }) {
+function SessionInspector({
+  task,
+  localSession,
+}: {
+  task?: Task;
+  localSession?: LocalRunnerSession | null;
+}) {
   if (!task) {
     return (
       <aside className="flex items-center justify-center rounded-[28px] border border-slate-200 bg-white text-sm text-slate-500 shadow-[0_16px_40px_rgba(15,23,42,0.05)]">
@@ -1498,6 +1712,22 @@ function SessionInspector({ task }: { task?: Task }) {
           value={task.runner_session_id ?? "No runner session id captured yet"}
           mono={Boolean(task.runner_session_id)}
         />
+        {localSession ? (
+          <>
+            <InspectorItem
+              icon={<Terminal className="size-5" />}
+              label="Local resume"
+              value={localSession.resume_command ?? "No resume command exposed"}
+              mono={Boolean(localSession.resume_command)}
+            />
+            <InspectorItem
+              icon={<Activity className="size-5" />}
+              label={`${localSession.message_count} local transcript messages`}
+              value={localSession.transcript_path ?? localSession.source}
+              mono={Boolean(localSession.transcript_path)}
+            />
+          </>
+        ) : null}
         <InspectorItem
           icon={<Folder className="size-5" />}
           label="Execution workspace"
